@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tetris × 1000</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0d0d1a;
+      color: #fff;
+      font-family: "Courier New", monospace;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* ── Name modal ─────────────────────────────────────────────────────── */
+    #nameModal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.88);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      z-index: 99;
+    }
+
+    #nameModal h1 {
+      font-size: clamp(32px, 6vw, 60px);
+      color: #00f0f0;
+      letter-spacing: 4px;
+      text-shadow: 0 0 30px #00f0f0, 0 0 60px #00f0f088;
+    }
+
+    #nameModal .subtitle {
+      color: #666;
+      font-size: 15px;
+    }
+
+    #nameInput {
+      background: #0a0a18;
+      border: 2px solid #3a3a8a;
+      color: #fff;
+      padding: 12px 24px;
+      font: 20px "Courier New", monospace;
+      text-align: center;
+      border-radius: 4px;
+      width: min(320px, 80vw);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #nameInput:focus { border-color: #00f0f0; }
+
+    #startBtn {
+      background: #00f0f0;
+      color: #000;
+      border: none;
+      padding: 13px 44px;
+      font: bold 18px "Courier New", monospace;
+      border-radius: 4px;
+      cursor: pointer;
+      letter-spacing: 2px;
+      transition: background 0.15s, transform 0.1s;
+    }
+    #startBtn:hover { background: #fff; transform: scale(1.06); }
+    #startBtn:active { transform: scale(0.98); }
+
+    .hint {
+      color: #444;
+      font-size: 11px;
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    /* ── Game canvas ─────────────────────────────────────────────────────── */
+    #gameCanvas {
+      display: none;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="nameModal">
+    <h1>TETRIS &times; 1000</h1>
+    <p class="subtitle">Up to 1000 players — last one standing wins</p>
+
+    <input
+      id="nameInput"
+      type="text"
+      maxlength="20"
+      placeholder="Enter your name…"
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <button id="startBtn">PLAY</button>
+
+    <p class="hint">
+      ← → move &nbsp;|&nbsp; ↑ / X rotate CW &nbsp;|&nbsp; Z rotate CCW<br>
+      Space hard-drop &nbsp;|&nbsp; ↓ soft-drop &nbsp;|&nbsp; C / Shift hold<br>
+      R restart after game over
+    </p>
+  </div>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <script src="game.js"></script>
+</body>
+</html>
