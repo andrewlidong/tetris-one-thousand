@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Tetris × 1000 — Server
-Supports up to 1000 concurrent WebSocket players with asyncio + aiohttp.
+Tetris × 1000 — Cooperative Massive Board
+All players share a single 100×30 board. Work together to clear lines!
+Active pieces pass through each other; only the settled board blocks movement.
 """
 
 import asyncio
@@ -13,31 +14,23 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-# Use orjson when available (5-10x faster than stdlib json)
 try:
-    import orjson as _json_lib
-    def _dumps(obj: object) -> str:
-        return _json_lib.dumps(obj).decode()
-    def _loads(s: str) -> object:
-        return _json_lib.loads(s)
+    import orjson as _jlib
+    def _dumps(o): return _jlib.dumps(o).decode()
+    def _loads(s): return _jlib.loads(s)
 except ImportError:
-    import json as _json_lib  # type: ignore[no-redef]
-    def _dumps(obj: object) -> str:
-        return _json_lib.dumps(obj)
-    def _loads(s: str) -> object:
-        return _json_lib.loads(s)
+    import json as _jlib  # type: ignore[no-redef]
+    def _dumps(o): return _jlib.dumps(o)
+    def _loads(s): return _jlib.loads(s)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Board constants ────────────────────────────────────────────────────────────
-
-W = 10   # board width
-H = 20   # board height
+# ── Shared board dimensions ────────────────────────────────────────────────────
+W = 100   # 10× standard width
+H = 30    # board height
 
 # ── Piece definitions (4 rotations each) ──────────────────────────────────────
-# Each rotation is a list of rows; 1 = filled cell.
-
 PIECES = [
     # 0 I (cyan)
     [
@@ -46,7 +39,7 @@ PIECES = [
         [[0,0,0,0],[0,0,0,0],[1,1,1,1],[0,0,0,0]],
         [[0,1,0,0],[0,1,0,0],[0,1,0,0],[0,1,0,0]],
     ],
-    # 1 O (yellow) — same all rotations
+    # 1 O (yellow)
     [[[0,1,1,0],[0,1,1,0],[0,0,0,0]]] * 4,
     # 2 T (purple)
     [
@@ -85,54 +78,93 @@ PIECES = [
     ],
 ]
 
-# Color index per piece type (1-7); 8 = garbage gray
 PIECE_COLORS = [1, 2, 3, 4, 5, 6, 7]
-GARBAGE_COLOR = 8
 
-# Lines → garbage sent to a random opponent
-GARBAGE_TABLE = {1: 0, 2: 1, 3: 2, 4: 4}
+# Scoring for line clears (shared bonus for all alive players)
+LINE_SCORE = [0, 100, 300, 500, 800]
+
+_BROADCAST_CHUNK = 50
+_MAX_MOVES_PER_SEC = 20
+_GRAVITY_INTERVAL = 2.0   # seconds; slow so players have time to maneuver
 
 
-# ── TetrisGame ─────────────────────────────────────────────────────────────────
+# ── SharedBoard ────────────────────────────────────────────────────────────────
 
-class TetrisGame:
-    """All server-side logic for one player's board."""
+class SharedBoard:
+    """The single board all players place pieces on."""
 
-    def __init__(self, player_id: int) -> None:
+    def __init__(self) -> None:
+        self.cells: list[list[int]] = [[0] * W for _ in range(H)]
+        self.total_lines = 0
+        self.dirty = True   # True = encode and broadcast on next world tick
+
+    def can_place(self, cells: list[tuple[int, int]]) -> bool:
+        """Check against board boundaries and settled cells only.
+        Active pieces are transparent to each other."""
+        for cx, cy in cells:
+            if cx < 0 or cx >= W or cy >= H:
+                return False
+            if cy >= 0 and self.cells[cy][cx]:
+                return False
+        return True
+
+    def lock(self, cells: list[tuple[int, int]], color: int) -> int:
+        """Place cells on board, clear completed lines, return count cleared."""
+        for cx, cy in cells:
+            if 0 <= cy < H and 0 <= cx < W:
+                self.cells[cy][cx] = color
+        cleared = self._clear_lines()
+        if cleared:
+            self.dirty = True
+        else:
+            self.dirty = True   # still dirty from the lock itself
+        return cleared
+
+    def _clear_lines(self) -> int:
+        full = [row for row in self.cells if all(row)]
+        count = len(full)
+        if count:
+            self.cells = [row for row in self.cells if not all(row)]
+            self.cells[:0] = [[0] * W for _ in range(count)]
+            self.total_lines += count
+        return count
+
+    def encode(self) -> str:
+        """3000-char hex string. Each cell → one hex digit (0-8 fit in '0'-'8')."""
+        return "".join(hex(c)[2:] for row in self.cells for c in row)
+
+
+# ── PlayerPiece ────────────────────────────────────────────────────────────────
+
+class PlayerPiece:
+    """One player's active piece on the shared board."""
+
+    def __init__(self, player_id: int, board: SharedBoard) -> None:
         self.player_id = player_id
-        self.board: list[list[int]] = [[0] * W for _ in range(H)]
-        self.score = 0
-        self.level = 1
-        self.lines_cleared = 0
-        self.alive = True
+        self.board = board
+        self.color = (player_id % 7) + 1   # deterministic 1-7 assignment
 
-        # Piece bag (7-bag randomizer)
         self._bag: list[int] = []
-        self.next_pieces: list[int] = []
+        self.next: list[int] = []
         self.held: int | None = None
         self.hold_used = False
 
-        # Active piece
         self.ptype = 0
         self.prot = 0
         self.px = 0
         self.py = 0
 
-        # Garbage queue
-        self.garbage_in = 0   # incoming (to receive on next lock)
-        self.garbage_out = 0  # outgoing (server will distribute)
-
-        # Gravity
+        self.alive = True
+        self.score = 0
         self._last_gravity = time.monotonic()
 
-        # Seed with two bags, then fill next queue and spawn
         self._refill()
         self._refill()
         for _ in range(5):
-            self.next_pieces.append(self._draw())
+            self.next.append(self._draw())
         self._spawn()
 
-    # ── Bag randomizer ──────────────────────────────────────────────────────
+    # ── Bag ──────────────────────────────────────────────────────────────────
 
     def _refill(self) -> None:
         bag = list(range(7))
@@ -144,18 +176,7 @@ class TetrisGame:
             self._refill()
         return self._bag.pop(0)
 
-    # ── Spawn / cells / validity ─────────────────────────────────────────────
-
-    def _spawn(self) -> None:
-        self.next_pieces.append(self._draw())
-        self.ptype = self.next_pieces.pop(0)
-        self.prot = 0
-        shape = PIECES[self.ptype][0]
-        self.px = (W - len(shape[0])) // 2
-        self.py = 0
-        self.hold_used = False
-        if not self._valid(self.ptype, self.prot, self.px, self.py):
-            self.alive = False
+    # ── Cell helpers ─────────────────────────────────────────────────────────
 
     def _cells(self, ptype: int, prot: int, px: int, py: int) -> list[tuple[int, int]]:
         return [
@@ -166,18 +187,28 @@ class TetrisGame:
         ]
 
     def _valid(self, ptype: int, prot: int, px: int, py: int) -> bool:
-        for cx, cy in self._cells(ptype, prot, px, py):
-            if cx < 0 or cx >= W or cy >= H:
-                return False
-            if cy >= 0 and self.board[cy][cx]:
-                return False
-        return True
+        return self.board.can_place(self._cells(ptype, prot, px, py))
 
     def _ghost_y(self) -> int:
         y = self.py
         while self._valid(self.ptype, self.prot, self.px, y + 1):
             y += 1
         return y
+
+    # ── Spawn ────────────────────────────────────────────────────────────────
+
+    def _spawn(self) -> None:
+        self.next.append(self._draw())
+        self.ptype = self.next.pop(0)
+        self.prot = 0
+        shape = PIECES[self.ptype][0]
+        pw = len(shape[0])
+        # Spread spawns across the wide board
+        self.px = random.randint(0, max(0, W - pw))
+        self.py = 0
+        self.hold_used = False
+        if not self._valid(self.ptype, 0, self.px, 0):
+            self.alive = False
 
     # ── Player actions ───────────────────────────────────────────────────────
 
@@ -189,22 +220,22 @@ class TetrisGame:
         if self.alive and self._valid(self.ptype, self.prot, self.px + 1, self.py):
             self.px += 1
 
-    def soft_drop(self) -> None:
+    def soft_drop(self) -> int:
         if not self.alive:
-            return
+            return 0
         if self._valid(self.ptype, self.prot, self.px, self.py + 1):
             self.py += 1
             self.score += 1
-        else:
-            self._lock()
+            return 0
+        return self._lock()
 
-    def hard_drop(self) -> None:
+    def hard_drop(self) -> int:
         if not self.alive:
-            return
+            return 0
         gy = self._ghost_y()
         self.score += (gy - self.py) * 2
         self.py = gy
-        self._lock()
+        return self._lock()
 
     def rotate_cw(self) -> None:
         if not self.alive:
@@ -235,114 +266,64 @@ class TetrisGame:
             self.ptype, self.held = self.held, self.ptype
             self.prot = 0
             shape = PIECES[self.ptype][0]
-            self.px = (W - len(shape[0])) // 2
+            pw = len(shape[0])
+            if not self._valid(self.ptype, 0, self.px, 0):
+                self.px = random.randint(0, max(0, W - pw))
             self.py = 0
 
-    # ── Lock / line clear / garbage ──────────────────────────────────────────
-
-    def _lock(self) -> None:
-        color = PIECE_COLORS[self.ptype]
-        for cx, cy in self._cells(self.ptype, self.prot, self.px, self.py):
-            if 0 <= cy < H and 0 <= cx < W:
-                self.board[cy][cx] = color
-
-        # Clear complete lines
-        new_board = [row for row in self.board if not all(row)]
-        cleared = H - len(new_board)
-        if cleared:
-            new_board[:0] = [[0] * W for _ in range(cleared)]
-            self.board = new_board
-            self.lines_cleared += cleared
-            self.level = self.lines_cleared // 10 + 1
-            score_table = [0, 100, 300, 500, 800]
-            self.score += score_table[min(cleared, 4)] * self.level
-            sent = GARBAGE_TABLE.get(cleared, 4)
-            # Cancel out incoming garbage first
-            cancel = min(sent, self.garbage_in)
-            sent -= cancel
-            self.garbage_in -= cancel
-            self.garbage_out += sent
-
-        # Apply incoming garbage
-        if self.garbage_in > 0:
-            lines = min(self.garbage_in, H - 1)
-            self.garbage_in -= lines
-            self.board = self.board[lines:]
-            gap = random.randrange(W)
-            for _ in range(lines):
-                row = [GARBAGE_COLOR] * W
-                row[gap] = 0
-                self.board.append(row)
-
+    def _lock(self) -> int:
+        cells = self._cells(self.ptype, self.prot, self.px, self.py)
+        cleared = self.board.lock(cells, self.color)
+        self.score += 10  # base placement bonus
         self._spawn()
+        return cleared
 
     # ── Gravity ──────────────────────────────────────────────────────────────
 
-    def gravity_tick(self) -> bool:
-        """Apply gravity if enough time has passed. Returns True if piece moved/locked."""
+    def gravity_tick(self) -> tuple[bool, int]:
+        """Apply gravity. Returns (moved, lines_cleared).
+        moved=False means the interval hasn't elapsed yet — skip state send."""
         if not self.alive:
-            return False
+            return False, 0
         now = time.monotonic()
-        interval = max(0.05, 1.0 / self.level)
-        if now - self._last_gravity < interval:
-            return False
+        if now - self._last_gravity < _GRAVITY_INTERVAL:
+            return False, 0
         self._last_gravity = now
-        old_y = self.py
         if self._valid(self.ptype, self.prot, self.px, self.py + 1):
             self.py += 1
-        else:
-            self._lock()
-        return True
+            return True, 0
+        return True, self._lock()
 
-    # ── State serialization ──────────────────────────────────────────────────
+    # ── State ────────────────────────────────────────────────────────────────
 
     def get_state(self) -> dict:
-        """Full state for the owning player."""
-        # Encode board with ghost: negative color = ghost
-        board = [row[:] for row in self.board]
-        if self.alive:
-            gy = self._ghost_y()
-            for cx, cy in self._cells(self.ptype, self.prot, self.px, gy):
-                if 0 <= cy < H and 0 <= cx < W and not board[cy][cx]:
-                    board[cy][cx] = -(PIECE_COLORS[self.ptype])
         return {
-            "board": board,
-            "piece": {"type": self.ptype, "rot": self.prot, "x": self.px, "y": self.py},
+            "piece": {
+                "type": self.ptype,
+                "rot": self.prot,
+                "x": self.px,
+                "y": self.py,
+                "ghost_y": self._ghost_y() if self.alive else self.py,
+            },
             "held": self.held,
-            "next": self.next_pieces[:5],
+            "next": self.next[:5],
             "score": self.score,
-            "level": self.level,
-            "lines": self.lines_cleared,
             "alive": self.alive,
-            "garbage_in": self.garbage_in,
+            "color": self.color,
         }
 
-    def encode_preview(self) -> str:
-        """Compact 200-char board string for the overview broadcast (0-8 per cell)."""
-        board = [row[:] for row in self.board]
-        if self.alive:
-            color = PIECE_COLORS[self.ptype]
-            for cx, cy in self._cells(self.ptype, self.prot, self.px, self.py):
-                if 0 <= cy < H and 0 <= cx < W:
-                    board[cy][cx] = color
-        return "".join(str(cell) for row in board for cell in row)
+    def as_piece_entry(self) -> list:
+        """Compact [pid, px, py, ptype, prot, color] for world broadcast."""
+        return [self.player_id, self.px, self.py, self.ptype, self.prot, self.color]
 
 
 # ── GameServer ─────────────────────────────────────────────────────────────────
 
-# How many sends to gather concurrently. Keeps per-broadcast memory bounded.
-_BROADCAST_CHUNK = 50
-
-# Max input messages accepted per player per second (token-bucket ceiling)
-_MAX_MOVES_PER_SEC = 20
-
-
 class GameServer:
     def __init__(self) -> None:
+        self.board = SharedBoard()
         self._players: dict[int, dict] = {}
         self._next_id = 1
-
-    # ── WebSocket handler ────────────────────────────────────────────────────
 
     async def ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30, max_msg_size=64 * 1024)
@@ -352,15 +333,20 @@ class GameServer:
         self._next_id += 1
         self._players[pid] = {
             "ws": ws,
-            "game": TetrisGame(pid),
+            "piece": PlayerPiece(pid, self.board),
             "name": f"Player{pid}",
-            # Rate limiting: track move timestamps in a small ring
             "_move_times": [],
         }
         log.info("[+] player %d  total=%d", pid, len(self._players))
 
         try:
+            # Send identity + current board snapshot
             await ws.send_str(_dumps({"type": "init", "player_id": pid}))
+            await ws.send_str(_dumps({
+                "type": "board",
+                "b": self.board.encode(),
+                "total_lines": self.board.total_lines,
+            }))
             await self._send_state(pid)
 
             async for msg in ws:
@@ -368,7 +354,7 @@ class GameServer:
                     try:
                         await self._on_message(pid, _loads(msg.data))
                     except Exception as exc:
-                        log.debug("message error pid=%d: %s", pid, exc)
+                        log.debug("msg error pid=%d: %s", pid, exc)
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
         except Exception as exc:
@@ -379,41 +365,43 @@ class GameServer:
 
         return ws
 
-    # ── Message handling ─────────────────────────────────────────────────────
-
     async def _on_message(self, pid: int, data: dict) -> None:
         p = self._players.get(pid)
         if not p:
             return
-        game: TetrisGame = p["game"]
+        piece: PlayerPiece = p["piece"]
         mtype = data.get("type")
 
         if mtype == "input":
-            if not game.alive:
+            if not piece.alive:
                 return
-            # Token-bucket rate limit: drop excess inputs beyond _MAX_MOVES_PER_SEC
+            # Token-bucket rate limit
             now_ts = time.monotonic()
-            times = p["_move_times"]
+            times: list = p["_move_times"]
             times.append(now_ts)
             cutoff = now_ts - 1.0
-            # Prune entries older than 1 second
             while times and times[0] < cutoff:
                 times.pop(0)
             if len(times) > _MAX_MOVES_PER_SEC:
                 return
+
             action = data.get("action", "")
-            if   action == "left":       game.move_left()
-            elif action == "right":      game.move_right()
-            elif action == "down":       game.soft_drop()
-            elif action == "hard_drop":  game.hard_drop()
-            elif action == "rotate_cw":  game.rotate_cw()
-            elif action == "rotate_ccw": game.rotate_ccw()
-            elif action == "hold":       game.hold()
+            cleared = 0
+            if   action == "left":       piece.move_left()
+            elif action == "right":      piece.move_right()
+            elif action == "down":       cleared = piece.soft_drop()
+            elif action == "hard_drop":  cleared = piece.hard_drop()
+            elif action == "rotate_cw":  piece.rotate_cw()
+            elif action == "rotate_ccw": piece.rotate_ccw()
+            elif action == "hold":       piece.hold()
+
+            if cleared:
+                await self._award_cooperative_bonus(cleared)
+
             await self._send_state(pid)
-            await self._distribute_garbage(pid)
 
         elif mtype == "restart":
-            p["game"] = TetrisGame(pid)
+            p["piece"] = PlayerPiece(pid, self.board)
             await self._send_state(pid)
 
         elif mtype == "name":
@@ -421,48 +409,44 @@ class GameServer:
             if raw:
                 p["name"] = raw
 
-    # ── State / garbage helpers ──────────────────────────────────────────────
+    async def _award_cooperative_bonus(self, cleared: int) -> None:
+        """Give all alive players a shared line-clear bonus."""
+        bonus = LINE_SCORE[min(cleared, 4)]
+        for p in self._players.values():
+            if p["piece"].alive:
+                p["piece"].score += bonus
 
     async def _send_state(self, pid: int) -> None:
         p = self._players.get(pid)
         if not p:
             return
-        msg = p["game"].get_state()
-        msg["type"] = "state"
+        state = p["piece"].get_state()
+        state["type"] = "state"
         try:
-            await p["ws"].send_str(_dumps(msg))
+            await p["ws"].send_str(_dumps(state))
         except Exception:
             pass
 
-    async def _distribute_garbage(self, pid: int) -> None:
-        p = self._players.get(pid)
-        if not p or p["game"].garbage_out <= 0:
-            return
-        lines = p["game"].garbage_out
-        p["game"].garbage_out = 0
-        targets = [q for qid, q in self._players.items()
-                   if qid != pid and q["game"].alive]
-        if targets:
-            random.choice(targets)["game"].garbage_in += lines
-
-    # ── Game loop ────────────────────────────────────────────────────────────
+    # ── Game loop ─────────────────────────────────────────────────────────────
 
     async def game_loop(self) -> None:
-        last_broadcast = 0.0
+        last_world = 0.0
 
         while True:
-            await asyncio.sleep(0.05)   # 20 Hz
+            await asyncio.sleep(0.05)  # 20 Hz
 
-            # Gravity for all alive players
+            # Apply gravity — only queue a state send when piece actually moved
             updated: list[int] = []
             for pid, p in list(self._players.items()):
-                game: TetrisGame = p["game"]
-                if game.alive and game.gravity_tick():
-                    updated.append(pid)
-                    if game.garbage_out > 0:
-                        await self._distribute_garbage(pid)
+                piece: PlayerPiece = p["piece"]
+                if piece.alive:
+                    moved, cleared = piece.gravity_tick()
+                    if moved:
+                        if cleared:
+                            await self._award_cooperative_bonus(cleared)
+                        updated.append(pid)
 
-            # Send state to players whose piece moved due to gravity (chunked)
+            # Send personal state updates (chunked)
             for i in range(0, len(updated), _BROADCAST_CHUNK):
                 chunk = updated[i : i + _BROADCAST_CHUNK]
                 await asyncio.gather(
@@ -470,58 +454,58 @@ class GameServer:
                     return_exceptions=True,
                 )
 
-            # Broadcast overview at ~2 Hz
+            # World broadcast at 5 Hz
             now = time.monotonic()
-            if now - last_broadcast >= 0.5:
-                last_broadcast = now
-                await self._broadcast_overview()
+            if now - last_world >= 0.2:
+                last_world = now
+                await self._broadcast_world()
 
-    # ── Overview broadcast ───────────────────────────────────────────────────
+    # ── World broadcast ───────────────────────────────────────────────────────
 
-    async def _broadcast_overview(self) -> None:
+    async def _broadcast_world(self) -> None:
         if not self._players:
             return
 
-        alive_count = sum(1 for p in self._players.values() if p["game"].alive)
+        alive_count = sum(1 for p in self._players.values() if p["piece"].alive)
 
-        # Sort by score descending
+        # Active pieces (all alive players)
+        pieces = [
+            p["piece"].as_piece_entry()
+            for p in self._players.values()
+            if p["piece"].alive
+        ]
+
+        # Leaderboard (top 50 by score)
         ranked = sorted(
             self._players.items(),
-            key=lambda kv: (-kv[1]["game"].score, not kv[1]["game"].alive),
+            key=lambda kv: -kv[1]["piece"].score,
         )
-
         leaderboard = [
             {
                 "id": pid,
                 "name": p["name"],
-                "score": p["game"].score,
-                "level": p["game"].level,
-                "lines": p["game"].lines_cleared,
-                "alive": p["game"].alive,
+                "score": p["piece"].score,
+                "alive": p["piece"].alive,
             }
             for pid, p in ranked[:50]
         ]
 
-        # Compact board previews for top 80 alive players
-        boards: dict[str, dict] = {}
-        alive_ranked = [(pid, p) for pid, p in ranked if p["game"].alive]
-        for pid, p in alive_ranked[:80]:
-            boards[str(pid)] = {
-                "name": p["name"],
-                "score": p["game"].score,
-                "b": p["game"].encode_preview(),  # compact 200-char string
-            }
-
-        payload = _dumps({
-            "type": "overview",
+        payload_obj: dict = {
+            "type": "world",
             "total": len(self._players),
             "alive": alive_count,
+            "total_lines": self.board.total_lines,
+            "pieces": pieces,
             "leaderboard": leaderboard,
-            "boards": boards,
-        })
+        }
 
-        # Chunked gather: bound the number of concurrent send coroutines to
-        # avoid excessive memory allocation when fan-out reaches 1000 clients.
+        # Include board string only when it changed since last broadcast
+        if self.board.dirty:
+            payload_obj["board"] = self.board.encode()
+            self.board.dirty = False
+
+        payload = _dumps(payload_obj)
+
         dead: list[int] = []
         items = list(self._players.items())
         for i in range(0, len(items), _BROADCAST_CHUNK):
@@ -541,25 +525,23 @@ class GameServer:
             dead.append(pid)
 
 
-# ── HTTP app setup ─────────────────────────────────────────────────────────────
+# ── App setup ──────────────────────────────────────────────────────────────────
 
 async def build_app() -> web.Application:
     server = GameServer()
-    # Disable per-message WebSocket compression: at 1000 clients, per-message
-    # deflate adds ~50µs CPU per send, totalling ~50ms per broadcast cycle.
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/ws", server.ws_handler)
     app.router.add_get("/", lambda _: web.FileResponse(Path("static/index.html")))
     app.router.add_static("/", Path("static"))
 
-    async def start_game_loop(app: web.Application) -> None:
-        app["game_loop"] = asyncio.create_task(server.game_loop())
+    async def _start(app: web.Application) -> None:
+        app["gl"] = asyncio.create_task(server.game_loop())
 
-    async def stop_game_loop(app: web.Application) -> None:
-        app["game_loop"].cancel()
+    async def _stop(app: web.Application) -> None:
+        app["gl"].cancel()
 
-    app.on_startup.append(start_game_loop)
-    app.on_cleanup.append(stop_game_loop)
+    app.on_startup.append(_start)
+    app.on_cleanup.append(_stop)
     return app
 
 
@@ -569,12 +551,11 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8765)
     await site.start()
-    log.info("Tetris × 1000 running at http://0.0.0.0:8765")
+    log.info("Tetris × 1000 — Massive Board  http://0.0.0.0:8765")
     await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    # Install uvloop when available: drop-in asyncio replacement, ~2x faster I/O
     try:
         import uvloop
         uvloop.install()
