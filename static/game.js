@@ -171,6 +171,7 @@ class TetrisClient {
 
   // ── Board decoding ──────────────────────────────────────────────────────────
   _decodeBoard(encoded) {
+    if (!encoded || encoded.length !== BW * BH) return;
     for (let r = 0; r < BH; r++)
       for (let c = 0; c < BW; c++)
         this.board[r][c] = parseInt(encoded[r * BW + c], 16);
@@ -459,7 +460,7 @@ class TetrisClient {
   }
 
   _miniPiece(ctx, ptype, cx, cy, cs) {
-    if (ptype == null) return;
+    if (ptype === null || ptype === undefined) return;
     const shape = PIECE_SHAPES[ptype];
     const color = COLORS[ptype + 1];
     const cols = shape[0].length, rows = shape.length;

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import random
 import time
+from collections import deque
 from pathlib import Path
 
 import aiohttp
@@ -114,10 +115,7 @@ class SharedBoard:
             if 0 <= cy < H and 0 <= cx < W:
                 self.cells[cy][cx] = color
         cleared = self._clear_lines()
-        if cleared:
-            self.dirty = True
-        else:
-            self.dirty = True   # still dirty from the lock itself
+        self.dirty = True
         return cleared
 
     def _clear_lines(self) -> int:
@@ -202,8 +200,6 @@ class PlayerPiece:
         self.score = 0
         self._last_gravity = time.monotonic()
 
-        self._refill()
-        self._refill()
         for _ in range(5):
             self.next.append(self._draw())
         self._spawn()
@@ -406,7 +402,7 @@ class GameServer:
             "ws": ws,
             "piece": PlayerPiece(pid, self.board, self.overlay),
             "name": f"Player{pid}",
-            "_move_times": [],
+            "_move_times": deque(),
         }
         log.info("[+] player %d  total=%d", pid, len(self._players))
 
@@ -449,11 +445,11 @@ class GameServer:
                 return
             # Token-bucket rate limit
             now_ts = time.monotonic()
-            times: list = p["_move_times"]
+            times: deque = p["_move_times"]
             times.append(now_ts)
             cutoff = now_ts - 1.0
             while times and times[0] < cutoff:
-                times.pop(0)
+                times.popleft()
             if len(times) > _MAX_MOVES_PER_SEC:
                 return
 
@@ -593,7 +589,8 @@ class GameServer:
     async def _send_raw(pid: int, p: dict, payload: str, dead: list) -> None:
         try:
             await p["ws"].send_str(payload)
-        except Exception:
+        except Exception as exc:
+            log.debug("send failed pid=%d: %s", pid, exc)
             dead.append(pid)
 
 
@@ -603,8 +600,9 @@ async def build_app() -> web.Application:
     server = GameServer()
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/ws", server.ws_handler)
-    app.router.add_get("/", lambda _: web.FileResponse(Path("static/index.html")))
-    app.router.add_static("/", Path("static"))
+    static_dir = Path(__file__).parent / "static"
+    app.router.add_get("/", lambda _: web.FileResponse(static_dir / "index.html"))
+    app.router.add_static("/", static_dir)
 
     async def _start(app: web.Application) -> None:
         app["gl"] = asyncio.create_task(server.game_loop())
