@@ -134,14 +134,58 @@ class SharedBoard:
         return "".join(hex(c)[2:] for row in self.cells for c in row)
 
 
+# ── ActivePiecesOverlay ────────────────────────────────────────────────────────
+
+class ActivePiecesOverlay:
+    """Tracks every player's active (unsettled) piece cells.
+
+    O(1) per-cell lookup so _valid() stays fast even at 1000 players.
+    Internally maintains two indices:
+      _by_player : pid  → frozenset of (cx, cy) currently occupied
+      _by_cell   : cell → set of pids occupying that cell
+    """
+
+    def __init__(self) -> None:
+        self._by_player: dict[int, frozenset[tuple[int, int]]] = {}
+        self._by_cell:   dict[tuple[int, int], set[int]]       = {}
+
+    def update(self, pid: int, cells: list[tuple[int, int]]) -> None:
+        """Replace pid's footprint with the new cell list."""
+        self._clear(pid)
+        bounded = frozenset((cx, cy) for cx, cy in cells if 0 <= cy < H and 0 <= cx < W)
+        self._by_player[pid] = bounded
+        for cell in bounded:
+            self._by_cell.setdefault(cell, set()).add(pid)
+
+    def remove(self, pid: int) -> None:
+        """Erase pid's footprint entirely (on lock or disconnect)."""
+        self._clear(pid)
+        self._by_player.pop(pid, None)
+
+    def _clear(self, pid: int) -> None:
+        for cell in self._by_player.get(pid, frozenset()):
+            occupants = self._by_cell.get(cell)
+            if occupants:
+                occupants.discard(pid)
+                if not occupants:
+                    del self._by_cell[cell]
+
+    def blocks(self, pid: int, cx: int, cy: int) -> bool:
+        """True if (cx, cy) is occupied by someone other than pid."""
+        occupants = self._by_cell.get((cx, cy))
+        return bool(occupants and any(p != pid for p in occupants))
+
+
 # ── PlayerPiece ────────────────────────────────────────────────────────────────
 
 class PlayerPiece:
     """One player's active piece on the shared board."""
 
-    def __init__(self, player_id: int, board: SharedBoard) -> None:
+    def __init__(self, player_id: int, board: SharedBoard,
+                 overlay: ActivePiecesOverlay) -> None:
         self.player_id = player_id
-        self.board = board
+        self.board   = board
+        self.overlay = overlay
         self.color = (player_id % 7) + 1   # deterministic 1-7 assignment
 
         self._bag: list[int] = []
@@ -187,7 +231,21 @@ class PlayerPiece:
         ]
 
     def _valid(self, ptype: int, prot: int, px: int, py: int) -> bool:
-        return self.board.can_place(self._cells(ptype, prot, px, py))
+        for cx, cy in self._cells(ptype, prot, px, py):
+            if cx < 0 or cx >= W or cy >= H:
+                return False
+            if cy >= 0 and self.board.cells[cy][cx]:
+                return False
+            if cy >= 0 and self.overlay.blocks(self.player_id, cx, cy):
+                return False
+        return True
+
+    def _sync_overlay(self) -> None:
+        """Push current piece position into the shared overlay."""
+        if self.alive:
+            self.overlay.update(self.player_id, self._cells(self.ptype, self.prot, self.px, self.py))
+        else:
+            self.overlay.remove(self.player_id)
 
     def _ghost_y(self) -> int:
         y = self.py
@@ -209,16 +267,19 @@ class PlayerPiece:
         self.hold_used = False
         if not self._valid(self.ptype, 0, self.px, 0):
             self.alive = False
+        self._sync_overlay()
 
     # ── Player actions ───────────────────────────────────────────────────────
 
     def move_left(self) -> None:
         if self.alive and self._valid(self.ptype, self.prot, self.px - 1, self.py):
             self.px -= 1
+            self._sync_overlay()
 
     def move_right(self) -> None:
         if self.alive and self._valid(self.ptype, self.prot, self.px + 1, self.py):
             self.px += 1
+            self._sync_overlay()
 
     def soft_drop(self) -> int:
         if not self.alive:
@@ -226,6 +287,7 @@ class PlayerPiece:
         if self._valid(self.ptype, self.prot, self.px, self.py + 1):
             self.py += 1
             self.score += 1
+            self._sync_overlay()
             return 0
         return self._lock()
 
@@ -235,6 +297,7 @@ class PlayerPiece:
         gy = self._ghost_y()
         self.score += (gy - self.py) * 2
         self.py = gy
+        self._sync_overlay()
         return self._lock()
 
     def rotate_cw(self) -> None:
@@ -244,6 +307,7 @@ class PlayerPiece:
         for dx, dy in [(0,0),(-1,0),(1,0),(0,-1),(-2,0),(2,0),(0,-2)]:
             if self._valid(self.ptype, new_rot, self.px + dx, self.py + dy):
                 self.prot, self.px, self.py = new_rot, self.px + dx, self.py + dy
+                self._sync_overlay()
                 return
 
     def rotate_ccw(self) -> None:
@@ -253,6 +317,7 @@ class PlayerPiece:
         for dx, dy in [(0,0),(1,0),(-1,0),(0,-1),(2,0),(-2,0),(0,-2)]:
             if self._valid(self.ptype, new_rot, self.px + dx, self.py + dy):
                 self.prot, self.px, self.py = new_rot, self.px + dx, self.py + dy
+                self._sync_overlay()
                 return
 
     def hold(self) -> None:
@@ -261,7 +326,7 @@ class PlayerPiece:
         self.hold_used = True
         if self.held is None:
             self.held = self.ptype
-            self._spawn()
+            self._spawn()   # _spawn calls _sync_overlay
         else:
             self.ptype, self.held = self.held, self.ptype
             self.prot = 0
@@ -270,12 +335,16 @@ class PlayerPiece:
             if not self._valid(self.ptype, 0, self.px, 0):
                 self.px = random.randint(0, max(0, W - pw))
             self.py = 0
+            self._sync_overlay()
 
     def _lock(self) -> int:
+        # Remove from overlay before writing to settled board so that
+        # other players' _valid() checks don't double-count this piece.
+        self.overlay.remove(self.player_id)
         cells = self._cells(self.ptype, self.prot, self.px, self.py)
         cleared = self.board.lock(cells, self.color)
         self.score += 10  # base placement bonus
-        self._spawn()
+        self._spawn()     # registers new piece in overlay (or marks dead)
         return cleared
 
     # ── Gravity ──────────────────────────────────────────────────────────────
@@ -291,6 +360,7 @@ class PlayerPiece:
         self._last_gravity = now
         if self._valid(self.ptype, self.prot, self.px, self.py + 1):
             self.py += 1
+            self._sync_overlay()
             return True, 0
         return True, self._lock()
 
@@ -321,7 +391,8 @@ class PlayerPiece:
 
 class GameServer:
     def __init__(self) -> None:
-        self.board = SharedBoard()
+        self.board   = SharedBoard()
+        self.overlay = ActivePiecesOverlay()
         self._players: dict[int, dict] = {}
         self._next_id = 1
 
@@ -333,7 +404,7 @@ class GameServer:
         self._next_id += 1
         self._players[pid] = {
             "ws": ws,
-            "piece": PlayerPiece(pid, self.board),
+            "piece": PlayerPiece(pid, self.board, self.overlay),
             "name": f"Player{pid}",
             "_move_times": [],
         }
@@ -361,6 +432,7 @@ class GameServer:
             log.debug("ws error pid=%d: %s", pid, exc)
         finally:
             self._players.pop(pid, None)
+            self.overlay.remove(pid)
             log.info("[-] player %d  total=%d", pid, len(self._players))
 
         return ws
@@ -401,7 +473,7 @@ class GameServer:
             await self._send_state(pid)
 
         elif mtype == "restart":
-            p["piece"] = PlayerPiece(pid, self.board)
+            p["piece"] = PlayerPiece(pid, self.board, self.overlay)
             await self._send_state(pid)
 
         elif mtype == "name":
