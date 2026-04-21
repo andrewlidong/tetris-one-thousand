@@ -5,8 +5,12 @@ function or __main__ guard) so its Pyodide runtime can schedule the
 coroutine on the existing event loop. Keep this file minimal.
 """
 
+print("[tetris-boot] main.py loaded")
+
 import asyncio
 
+print("[tetris-boot] importing tetris.main")
 from tetris.main import run
 
+print("[tetris-boot] calling asyncio.run")
 asyncio.run(run())
