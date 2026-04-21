@@ -1,0 +1,52 @@
+name: Deploy Tetris to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Check out into a folder literally named "tetris" so pygbag names the
+      # archive tetris.apk (pygbag uses the parent folder name for the bundle).
+      - uses: actions/checkout@v4
+        with:
+          path: tetris
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.10.6"
+
+      - name: Install deps
+        working-directory: tetris
+        run: uv sync --group dev
+
+      - name: Build web bundle
+        working-directory: tetris
+        run: uv run pygbag --build --app_name tetris --title "Tetris" main.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: tetris/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
