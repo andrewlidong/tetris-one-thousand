@@ -1,0 +1,31 @@
+[project]
+name = "tetris"
+version = "0.1.0"
+description = "Modern Tetris in Python (pygame-ce), web-ready via pygbag"
+readme = "README.md"
+authors = [
+    { name = "andrewlidong", email = "andrewdong1994@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pygame-ce>=2.5.7",
+]
+
+[project.scripts]
+tetris = "tetris:main"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.11",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
