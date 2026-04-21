@@ -13,11 +13,14 @@ from .render import make_fonts, render, window_size
 
 
 async def run() -> None:
+    print("[tetris] run() start")
     pygame.init()
     pygame.display.set_caption("Tetris")
+    print(f"[tetris] set_mode {window_size()}")
     screen = pygame.display.set_mode(window_size())
     clock = pygame.time.Clock()
     fonts = make_fonts()
+    print("[tetris] init complete, entering loop")
 
     game = GameState()
     inputs = InputHandler()
