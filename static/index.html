@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tetris 1000</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111;
+  color: #eee;
+  font-family: 'Courier New', monospace;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100vh;
+  overflow: hidden;
+}
+#header {
+  display: flex;
+  gap: 2rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  background: #1a1a1a;
+  width: 100%;
+  justify-content: center;
+}
+#header span { opacity: 0.7; }
+#header strong { color: #0ff; }
+#canvas-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  overflow: auto;
+}
+canvas {
+  background: #000;
+  border: 1px solid #333;
+}
+#status {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.5rem;
+  color: #ff0;
+  display: none;
+  text-align: center;
+}
+#controls {
+  padding: 0.4rem;
+  font-size: 0.75rem;
+  opacity: 0.4;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <span>Players: <strong id="hud-players">0</strong></span>
+  <span>Score: <strong id="hud-score">0</strong></span>
+  <span>Lines: <strong id="hud-lines">0</strong></span>
+  <span>Board: <strong id="hud-size">0x0</strong></span>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="board"></canvas>
+</div>
+
+<div id="status"></div>
+<div id="controls">Arrow keys: move &amp; soft drop | Z/X: rotate | Space: hard drop</div>
+
+<script>
+const CELL = 16;
+const COLORS = [
+  null,         // 0 = empty
+  '#00f0f0',   // 1 = I (cyan)
+  '#f0f000',   // 2 = O (yellow)
+  '#a000f0',   // 3 = T (purple)
+  '#00f000',   // 4 = S (green)
+  '#f00000',   // 5 = Z (red)
+  '#0000f0',   // 6 = J (blue)
+  '#f0a000',   // 7 = L (orange)
+];
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+
+let myPlayerId = null;
+let lastState = null;
+let ws = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    statusEl.style.display = 'none';
+  };
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === 'welcome') {
+      myPlayerId = msg.player_id;
+    } else if (msg.type === 'state') {
+      lastState = msg;
+      render(msg);
+      updateHUD(msg);
+    }
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected. Reconnecting...';
+    statusEl.style.display = 'block';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+function render(state) {
+  const grid = state.grid;
+  const rows = grid.length;
+  const cols = grid[0].length;
+
+  canvas.width = cols * CELL;
+  canvas.height = rows * CELL;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw locked cells
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (grid[r][c] !== 0) {
+        drawCell(r, c, COLORS[grid[r][c]] || '#888');
+      }
+    }
+  }
+
+  // Draw grid lines (subtle)
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 0.5;
+  for (let r = 0; r <= rows; r++) {
+    ctx.beginPath();
+    ctx.moveTo(0, r * CELL);
+    ctx.lineTo(cols * CELL, r * CELL);
+    ctx.stroke();
+  }
+  for (let c = 0; c <= cols; c++) {
+    ctx.beginPath();
+    ctx.moveTo(c * CELL, 0);
+    ctx.lineTo(c * CELL, rows * CELL);
+    ctx.stroke();
+  }
+
+  // Draw active pieces
+  const pieces = state.active_pieces;
+  for (const pid in pieces) {
+    const p = pieces[pid];
+    const color = COLORS[pieceTypeToColor(p.piece_type)] || '#fff';
+    const isMe = pid === myPlayerId;
+    for (const cell of p.cells) {
+      drawCell(cell.row, cell.col, color, isMe);
+    }
+  }
+
+  // Game over overlay
+  if (state.game_over) {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#f00';
+    ctx.font = 'bold 24px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
+  }
+}
+
+function drawCell(r, c, color, highlight) {
+  const x = c * CELL;
+  const y = r * CELL;
+  ctx.fillStyle = color;
+  ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+  if (highlight) {
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, CELL - 2, CELL - 2);
+  }
+}
+
+function pieceTypeToColor(type) {
+  const map = { I: 1, O: 2, T: 3, S: 4, Z: 5, J: 6, L: 7 };
+  return map[type] || 0;
+}
+
+function updateHUD(state) {
+  document.getElementById('hud-players').textContent = state.player_count;
+  document.getElementById('hud-score').textContent = state.score;
+  document.getElementById('hud-lines').textContent = state.lines_cleared;
+  document.getElementById('hud-size').textContent = `${state.board_width}x${state.board_height}`;
+}
+
+// Keyboard controls
+const KEY_MAP = {
+  ArrowLeft:  'left',
+  ArrowRight: 'right',
+  ArrowDown:  'soft_drop',
+  ArrowUp:    'rotate_cw',
+  KeyZ:       'rotate_ccw',
+  KeyX:       'rotate_cw',
+  Space:      'hard_drop',
+};
+
+document.addEventListener('keydown', (e) => {
+  const action = KEY_MAP[e.code];
+  if (action && ws && ws.readyState === WebSocket.OPEN) {
+    e.preventDefault();
+    ws.send(JSON.stringify({ action }));
+  }
+});
+
+// Start
+statusEl.textContent = 'Connecting...';
+statusEl.style.display = 'block';
+connect();
+</script>
+</body>
+</html>
