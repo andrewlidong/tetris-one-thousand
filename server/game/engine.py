@@ -45,9 +45,13 @@ class GameEngine:
         self.board = Board(width=width, height=height)
         self.active_pieces: dict[str, PieceState] = {}  # player_id -> PieceState
         self.bags: dict[str, Bag] = {}  # player_id -> their personal Bag
+        self.next_pieces: dict[str, PieceType] = {}  # player_id -> next piece preview
         self.score: int = 0
         self.lines_cleared: int = 0
         self.game_over: bool = False
+        # Delta tracking: cells that changed since last get_delta() call
+        self._dirty_cells: set[tuple[int, int]] = set()
+        self._prev_grid_width: int = width
 
     @property
     def player_count(self) -> int:
@@ -67,8 +71,10 @@ class GameEngine:
         if new_width > self.board.width:
             self.board.expand_width(new_width)
 
-        # Give the player their own bag
-        self.bags[player_id] = Bag()
+        # Give the player their own bag and pre-generate next piece
+        bag = Bag()
+        self.bags[player_id] = bag
+        self.next_pieces[player_id] = bag.next()
 
         return self.spawn_piece(player_id)
 
@@ -76,6 +82,7 @@ class GameEngine:
         """Remove a player and their active piece from the game."""
         self.active_pieces.pop(player_id, None)
         self.bags.pop(player_id, None)
+        self.next_pieces.pop(player_id, None)
 
     def spawn_piece(self, player_id: str) -> PieceState | None:
         """Spawn a new piece for the given player at a spread-out column."""
@@ -86,7 +93,9 @@ class GameEngine:
         if bag is None:
             return None
 
-        piece_type = bag.next()
+        # Use the pre-generated next piece, then generate a new next
+        piece_type = self.next_pieces.get(player_id, bag.next())
+        self.next_pieces[player_id] = bag.next()
 
         # Pick a random spawn column, leaving room for the piece (max width 4)
         max_col = max(0, self.board.width - 4)
@@ -173,14 +182,21 @@ class GameEngine:
         if piece is None:
             return
 
+        # Track locked cells as dirty
+        for cell in get_cells(piece):
+            self._dirty_cells.add((cell.row, cell.col))
+
         self.board.lock_piece(piece)
 
         cleared = self.board.clear_lines()
         if cleared > 0:
             self.lines_cleared += cleared
-            # Scoring: more lines at once = more points (classic Tetris scoring)
             points = {1: 100, 2: 300, 3: 500, 4: 800}
             self.score += points.get(cleared, cleared * 200)
+            # Line clear affects everything — mark entire board dirty
+            for r in range(self.board.height):
+                for c in range(self.board.width):
+                    self._dirty_cells.add((r, c))
 
         if self.board.is_topped_out():
             self.game_over = True
@@ -211,20 +227,36 @@ class GameEngine:
         for player_id in to_lock:
             self._lock_piece(player_id)
 
-    def get_state(self) -> dict:
-        """Snapshot the current game state for broadcasting."""
+    def _ghost_position(self, piece: PieceState) -> PieceState:
+        """Calculate where a piece would land if hard-dropped (ghost piece)."""
+        current = piece
+        while True:
+            next_pos = current.moved(1, 0)
+            if not self.board.is_valid_position(next_pos):
+                return current
+            current = next_pos
+
+    def _build_active_pieces(self) -> dict:
         active = {}
         for player_id, piece in self.active_pieces.items():
             cells = get_cells(piece)
+            ghost = self._ghost_position(piece)
+            ghost_cells = get_cells(ghost)
+            next_type = self.next_pieces.get(player_id)
             active[player_id] = {
                 "piece_type": piece.piece_type.value,
                 "cells": [{"row": c.row, "col": c.col} for c in cells],
+                "ghost_cells": [{"row": c.row, "col": c.col} for c in ghost_cells],
                 "rotation": piece.rotation,
+                "next_piece": next_type.value if next_type else None,
             }
+        return active
 
+    def get_state(self) -> dict:
+        """Full state snapshot (sent to new connections)."""
         return {
             "grid": self.board.get_grid_snapshot(),
-            "active_pieces": active,
+            "active_pieces": self._build_active_pieces(),
             "score": self.score,
             "lines_cleared": self.lines_cleared,
             "board_width": self.board.width,
@@ -232,3 +264,35 @@ class GameEngine:
             "player_count": self.player_count,
             "game_over": self.game_over,
         }
+
+    def get_delta(self) -> dict:
+        """Delta state — only changed grid cells + all active pieces.
+
+        Returns a dict with 'grid_delta' (list of [row, col, color]) instead
+        of the full grid. Also includes board_width if it changed.
+        Clears the dirty set after building the delta.
+        """
+        delta: list[list[int]] = []
+        for r, c in self._dirty_cells:
+            if 0 <= r < self.board.height and 0 <= c < self.board.width:
+                delta.append([r, c, int(self.board.grid[r][c])])
+        self._dirty_cells.clear()
+
+        result: dict = {
+            "active_pieces": self._build_active_pieces(),
+            "score": self.score,
+            "lines_cleared": self.lines_cleared,
+            "player_count": self.player_count,
+            "game_over": self.game_over,
+        }
+
+        if delta:
+            result["grid_delta"] = delta
+
+        # If board expanded, tell the client
+        if self.board.width != self._prev_grid_width:
+            result["board_width"] = self.board.width
+            result["board_height"] = self.board.height
+            self._prev_grid_width = self.board.width
+
+        return result

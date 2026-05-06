@@ -18,14 +18,14 @@ manager = ConnectionManager()
 
 
 async def game_loop() -> None:
-    """Tick the engine at a fixed rate and broadcast state to all players."""
+    """Tick the engine at a fixed rate and broadcast deltas to all players."""
     while True:
         await asyncio.sleep(TICK_RATE)
         if engine.game_over:
             continue
         engine.tick()
-        state = engine.get_state()
-        await manager.broadcast({"type": "state", **state})
+        delta = engine.get_delta()
+        await manager.broadcast({"type": "delta", **delta})
 
 
 @asynccontextmanager
@@ -50,15 +50,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     # Add the player to the game engine
     piece = engine.add_player(player_id)
 
-    # Send the player their ID and initial state
+    # Send welcome + full state to the new player
     await manager.send_to(ws, {
         "type": "welcome",
         "player_id": player_id,
     })
+    await manager.send_to(ws, {"type": "state", **engine.get_state()})
 
-    # Broadcast updated state to everyone
-    state = engine.get_state()
-    await manager.broadcast({"type": "state", **state})
+    # Send delta to everyone else so they see the new piece
+    delta = engine.get_delta()
+    await manager.broadcast({"type": "delta", **delta})
 
     try:
         while True:
@@ -74,15 +75,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
             engine.process_action(player_id, action)
 
-            # Broadcast state after action
-            state = engine.get_state()
-            await manager.broadcast({"type": "state", **state})
+            # Broadcast delta after action
+            delta = engine.get_delta()
+            await manager.broadcast({"type": "delta", **delta})
 
     except WebSocketDisconnect:
         pass
     finally:
         manager.disconnect(ws)
         engine.remove_player(player_id)
-        # Broadcast updated state
-        state = engine.get_state()
-        await manager.broadcast({"type": "state", **state})
+        delta = engine.get_delta()
+        await manager.broadcast({"type": "delta", **delta})

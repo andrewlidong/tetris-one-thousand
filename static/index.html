@@ -24,18 +24,43 @@ body {
   background: #1a1a1a;
   width: 100%;
   justify-content: center;
+  z-index: 10;
 }
 #header span { opacity: 0.7; }
 #header strong { color: #0ff; }
-#canvas-wrap {
+#game-area {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
   width: 100%;
+  overflow: hidden;
+  position: relative;
+}
+#canvas-wrap {
+  flex: 1;
   overflow: auto;
+  position: relative;
 }
 canvas {
+  background: #000;
+  display: block;
+}
+#sidebar {
+  width: 100px;
+  background: #1a1a1a;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  border-left: 1px solid #333;
+}
+#sidebar h3 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.5;
+}
+#next-canvas {
   background: #000;
   border: 1px solid #333;
 }
@@ -48,6 +73,7 @@ canvas {
   color: #ff0;
   display: none;
   text-align: center;
+  z-index: 20;
 }
 #controls {
   padding: 0.4rem;
@@ -66,8 +92,14 @@ canvas {
   <span>Board: <strong id="hud-size">0x0</strong></span>
 </div>
 
-<div id="canvas-wrap">
-  <canvas id="board"></canvas>
+<div id="game-area">
+  <div id="canvas-wrap">
+    <canvas id="board"></canvas>
+  </div>
+  <div id="sidebar">
+    <h3>Next</h3>
+    <canvas id="next-canvas" width="80" height="64"></canvas>
+  </div>
 </div>
 
 <div id="status"></div>
@@ -85,14 +117,35 @@ const COLORS = [
   '#0000f0',   // 6 = J (blue)
   '#f0a000',   // 7 = L (orange)
 ];
+const PIECE_COLOR_MAP = { I: 1, O: 2, T: 3, S: 4, Z: 5, J: 6, L: 7 };
+
+// Next piece preview shapes (rotation 0)
+const NEXT_SHAPES = {
+  I: [[0,0],[0,1],[0,2],[0,3]],
+  O: [[0,0],[0,1],[1,0],[1,1]],
+  T: [[0,1],[1,0],[1,1],[1,2]],
+  S: [[0,1],[0,2],[1,0],[1,1]],
+  Z: [[0,0],[0,1],[1,1],[1,2]],
+  J: [[0,0],[1,0],[1,1],[1,2]],
+  L: [[0,2],[1,0],[1,1],[1,2]],
+};
 
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
+const nextCanvas = document.getElementById('next-canvas');
+const nextCtx = nextCanvas.getContext('2d');
+const canvasWrap = document.getElementById('canvas-wrap');
 const statusEl = document.getElementById('status');
 
 let myPlayerId = null;
-let lastState = null;
 let ws = null;
+
+// Client-side grid state (applied from full state + deltas)
+let grid = [];
+let boardWidth = 0;
+let boardHeight = 0;
+let activePieces = {};
+let gameOver = false;
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -107,9 +160,20 @@ function connect() {
     if (msg.type === 'welcome') {
       myPlayerId = msg.player_id;
     } else if (msg.type === 'state') {
-      lastState = msg;
-      render(msg);
+      // Full state — replace everything
+      grid = msg.grid;
+      boardWidth = msg.board_width;
+      boardHeight = msg.board_height;
+      activePieces = msg.active_pieces;
+      gameOver = msg.game_over;
       updateHUD(msg);
+      render();
+      scrollToMyPiece();
+    } else if (msg.type === 'delta') {
+      applyDelta(msg);
+      updateHUD(msg);
+      render();
+      scrollToMyPiece();
     }
   };
 
@@ -122,8 +186,32 @@ function connect() {
   ws.onerror = () => ws.close();
 }
 
-function render(state) {
-  const grid = state.grid;
+function applyDelta(msg) {
+  // Expand grid if board grew
+  if (msg.board_width && msg.board_width > boardWidth) {
+    const extra = msg.board_width - boardWidth;
+    for (let r = 0; r < grid.length; r++) {
+      for (let i = 0; i < extra; i++) grid[r].push(0);
+    }
+    boardWidth = msg.board_width;
+  }
+  if (msg.board_height) boardHeight = msg.board_height;
+
+  // Apply cell changes
+  if (msg.grid_delta) {
+    for (const [r, c, val] of msg.grid_delta) {
+      if (r < grid.length && c < grid[0].length) {
+        grid[r][c] = val;
+      }
+    }
+  }
+
+  activePieces = msg.active_pieces;
+  gameOver = msg.game_over;
+}
+
+function render() {
+  if (!grid.length) return;
   const rows = grid.length;
   const cols = grid[0].length;
 
@@ -137,12 +225,12 @@ function render(state) {
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       if (grid[r][c] !== 0) {
-        drawCell(r, c, COLORS[grid[r][c]] || '#888');
+        drawCell(ctx, r, c, COLORS[grid[r][c]] || '#888');
       }
     }
   }
 
-  // Draw grid lines (subtle)
+  // Draw grid lines
   ctx.strokeStyle = '#1a1a1a';
   ctx.lineWidth = 0.5;
   for (let r = 0; r <= rows; r++) {
@@ -158,19 +246,31 @@ function render(state) {
     ctx.stroke();
   }
 
-  // Draw active pieces
-  const pieces = state.active_pieces;
-  for (const pid in pieces) {
-    const p = pieces[pid];
-    const color = COLORS[pieceTypeToColor(p.piece_type)] || '#fff';
+  // Draw ghost pieces and active pieces
+  for (const pid in activePieces) {
+    const p = activePieces[pid];
+    const colorIdx = PIECE_COLOR_MAP[p.piece_type] || 0;
+    const color = COLORS[colorIdx] || '#fff';
     const isMe = pid === myPlayerId;
+
+    // Ghost piece (only for current player, drawn first so real piece overlays)
+    if (isMe && p.ghost_cells) {
+      for (const cell of p.ghost_cells) {
+        drawGhostCell(ctx, cell.row, cell.col, color);
+      }
+    }
+
+    // Active piece
     for (const cell of p.cells) {
-      drawCell(cell.row, cell.col, color, isMe);
+      drawCell(ctx, cell.row, cell.col, color, isMe);
     }
   }
 
+  // Next piece preview
+  renderNextPiece();
+
   // Game over overlay
-  if (state.game_over) {
+  if (gameOver) {
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#f00';
@@ -180,28 +280,82 @@ function render(state) {
   }
 }
 
-function drawCell(r, c, color, highlight) {
+function drawCell(context, r, c, color, highlight) {
   const x = c * CELL;
   const y = r * CELL;
-  ctx.fillStyle = color;
-  ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+  context.fillStyle = color;
+  context.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
   if (highlight) {
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x + 1, y + 1, CELL - 2, CELL - 2);
+    context.strokeStyle = '#fff';
+    context.lineWidth = 2;
+    context.strokeRect(x + 1, y + 1, CELL - 2, CELL - 2);
   }
 }
 
-function pieceTypeToColor(type) {
-  const map = { I: 1, O: 2, T: 3, S: 4, Z: 5, J: 6, L: 7 };
-  return map[type] || 0;
+function drawGhostCell(context, r, c, color) {
+  const x = c * CELL;
+  const y = r * CELL;
+  context.strokeStyle = color;
+  context.lineWidth = 1;
+  context.globalAlpha = 0.3;
+  context.strokeRect(x + 2, y + 2, CELL - 4, CELL - 4);
+  context.globalAlpha = 1.0;
+}
+
+function renderNextPiece() {
+  const myPiece = activePieces[myPlayerId];
+  nextCtx.fillStyle = '#000';
+  nextCtx.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+
+  if (!myPiece || !myPiece.next_piece) return;
+
+  const shape = NEXT_SHAPES[myPiece.next_piece];
+  if (!shape) return;
+
+  const colorIdx = PIECE_COLOR_MAP[myPiece.next_piece] || 0;
+  const color = COLORS[colorIdx] || '#fff';
+  const previewCell = 16;
+  // Center the preview
+  const offsetX = (nextCanvas.width - 4 * previewCell) / 2;
+  const offsetY = (nextCanvas.height - 2 * previewCell) / 2;
+
+  for (const [r, c] of shape) {
+    const x = offsetX + c * previewCell;
+    const y = offsetY + r * previewCell;
+    nextCtx.fillStyle = color;
+    nextCtx.fillRect(x + 1, y + 1, previewCell - 2, previewCell - 2);
+  }
+}
+
+function scrollToMyPiece() {
+  const myPiece = activePieces[myPlayerId];
+  if (!myPiece || !myPiece.cells.length) return;
+
+  // Find center of my piece
+  let sumCol = 0;
+  for (const cell of myPiece.cells) sumCol += cell.col;
+  const centerCol = sumCol / myPiece.cells.length;
+  const targetX = centerCol * CELL - canvasWrap.clientWidth / 2;
+
+  // Smooth scroll horizontally to keep piece visible
+  const currentX = canvasWrap.scrollLeft;
+  const diff = targetX - currentX;
+  // Only scroll if piece is more than 30% off-center
+  if (Math.abs(diff) > canvasWrap.clientWidth * 0.3) {
+    canvasWrap.scrollLeft = currentX + diff * 0.15;
+  }
 }
 
 function updateHUD(state) {
-  document.getElementById('hud-players').textContent = state.player_count;
-  document.getElementById('hud-score').textContent = state.score;
-  document.getElementById('hud-lines').textContent = state.lines_cleared;
-  document.getElementById('hud-size').textContent = `${state.board_width}x${state.board_height}`;
+  if (state.player_count !== undefined)
+    document.getElementById('hud-players').textContent = state.player_count;
+  if (state.score !== undefined)
+    document.getElementById('hud-score').textContent = state.score;
+  if (state.lines_cleared !== undefined)
+    document.getElementById('hud-lines').textContent = state.lines_cleared;
+  const w = state.board_width || boardWidth;
+  const h = state.board_height || boardHeight;
+  if (w && h) document.getElementById('hud-size').textContent = `${w}x${h}`;
 }
 
 // Keyboard controls
