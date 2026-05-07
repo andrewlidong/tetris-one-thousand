@@ -54,6 +54,10 @@ class GameEngine:
         self._dirty_pieces: set[str] = set()
         self._removed_players: set[str] = set()
         self._prev_grid_width: int = width
+        # Active piece collision map: (row, col) -> player_id who currently
+        # occupies that cell. Used so other players' falling pieces collide
+        # with each other instead of phasing through.
+        self._active_cell_owners: dict[tuple[int, int], str] = {}
 
     @property
     def player_count(self) -> int:
@@ -68,8 +72,10 @@ class GameEngine:
         if self.game_over:
             return None
 
-        # Expand board if needed
-        new_width = self.desired_width(len(self.active_pieces) + 1)
+        # Expand board if needed. Counted from bags (every connected player)
+        # rather than active_pieces (only those with a current piece) so the
+        # board grows even when piece-on-piece collisions block some spawns.
+        new_width = self.desired_width(len(self.bags) + 1)
         if new_width > self.board.width:
             self.board.expand_width(new_width)
 
@@ -85,9 +91,55 @@ class GameEngine:
         if player_id in self.active_pieces or player_id in self.bags:
             self._removed_players.add(player_id)
             self._dirty_pieces.discard(player_id)
+        self._release_cells(player_id)
         self.active_pieces.pop(player_id, None)
         self.bags.pop(player_id, None)
         self.next_pieces.pop(player_id, None)
+
+    def _release_cells(self, player_id: str) -> None:
+        """Drop the player's current piece cells from the active collision map."""
+        piece = self.active_pieces.get(player_id)
+        if piece is None:
+            return
+        for cell in get_cells(piece):
+            if self._active_cell_owners.get((cell.row, cell.col)) == player_id:
+                del self._active_cell_owners[(cell.row, cell.col)]
+
+    def _claim_cells(self, player_id: str, piece: PieceState) -> None:
+        """Mark cells as occupied by player_id."""
+        for cell in get_cells(piece):
+            self._active_cell_owners[(cell.row, cell.col)] = player_id
+
+    def _can_place(self, player_id: str, piece: PieceState) -> bool:
+        """Can this piece occupy these cells right now? Checks board bounds,
+        locked grid, and collisions with *other* players' active pieces.
+        Caller is responsible for releasing this player's existing cells
+        first (otherwise the piece will collide with itself).
+        """
+        if not self.board.is_valid_position(piece):
+            return False
+        for cell in get_cells(piece):
+            owner = self._active_cell_owners.get((cell.row, cell.col))
+            if owner is not None and owner != player_id:
+                return False
+        return True
+
+    def _blocked_only_by_active(self, player_id: str, piece: PieceState) -> bool:
+        """True if `piece` cannot be placed but every blocker is another
+        player's active piece (no walls, no floor, no locked grid). Used so
+        a piece resting on another active piece doesn't lock — instead it
+        rides on top and falls when the supporter falls.
+        """
+        has_active_block = False
+        for cell in get_cells(piece):
+            if not self.board.in_bounds(cell):
+                return False  # wall/floor block — must lock
+            if self.board.grid[cell.row][cell.col] != 0:
+                return False  # locked grid block — must lock
+            owner = self._active_cell_owners.get((cell.row, cell.col))
+            if owner is not None and owner != player_id:
+                has_active_block = True
+        return has_active_block
 
     def spawn_piece(self, player_id: str) -> PieceState | None:
         """Spawn a new piece for the given player at a spread-out column.
@@ -111,9 +163,10 @@ class GameEngine:
                 position=Position(SPAWN_TOP_ROW, col),
                 rotation=0,
             )
-            if self.board.is_valid_position(piece):
+            if self._can_place(player_id, piece):
                 self.next_pieces[player_id] = bag.next()
                 self.active_pieces[player_id] = piece
+                self._claim_cells(player_id, piece)
                 self._dirty_pieces.add(player_id)
                 return piece
 
@@ -140,47 +193,108 @@ class GameEngine:
 
         return False
 
+    def _carried_stack(self, player_id: str) -> list[str]:
+        """All active pieces that rest on player_id's piece (transitively).
+
+        Walks upward through the active-cell map: for each piece in the
+        stack, the cell directly above each of its cells tells us who (if
+        anyone) is sitting on it. O(stack-size × piece-size), not O(N).
+        """
+        stack = {player_id}
+        queue = [player_id]
+        while queue:
+            pid = queue.pop()
+            piece = self.active_pieces.get(pid)
+            if piece is None:
+                continue
+            for cell in get_cells(piece):
+                owner_above = self._active_cell_owners.get((cell.row - 1, cell.col))
+                if owner_above is not None and owner_above not in stack:
+                    stack.add(owner_above)
+                    queue.append(owner_above)
+        return list(stack)
+
     def _try_move(self, player_id: str, piece: PieceState, d_row: int, d_col: int) -> bool:
-        """Try to move a piece by the given offset."""
-        new_piece = piece.moved(d_row, d_col)
-        if self.board.is_valid_position(new_piece):
-            self.active_pieces[player_id] = new_piece
-            self._dirty_pieces.add(player_id)
-            return True
-        return False
+        """Try to move a piece by the given offset.
+
+        Horizontal moves carry every piece resting on top of this one (and
+        on those, transitively). Vertical moves only move the single piece.
+        If any piece in the carried stack would collide, the whole move
+        is rejected.
+        """
+        # Vertical moves (gravity / soft drop) only affect this piece.
+        if d_col == 0:
+            new_piece = piece.moved(d_row, d_col)
+            self._release_cells(player_id)
+            if self._can_place(player_id, new_piece):
+                self.active_pieces[player_id] = new_piece
+                self._claim_cells(player_id, new_piece)
+                self._dirty_pieces.add(player_id)
+                return True
+            self._claim_cells(player_id, piece)
+            return False
+
+        # Horizontal move: also drag everything stacked on top.
+        stack_ids = self._carried_stack(player_id)
+        old_pieces = {pid: self.active_pieces[pid] for pid in stack_ids}
+        for pid in stack_ids:
+            self._release_cells(pid)
+
+        # Validate every piece in the stack at its new position. With all
+        # stack cells released, _can_place only sees walls, locked grid,
+        # and active pieces *outside* the stack.
+        new_pieces = {pid: old.moved(d_row, d_col) for pid, old in old_pieces.items()}
+        if not all(self._can_place(pid, np) for pid, np in new_pieces.items()):
+            for pid, old in old_pieces.items():
+                self._claim_cells(pid, old)
+            return False
+
+        for pid, np in new_pieces.items():
+            self.active_pieces[pid] = np
+            self._claim_cells(pid, np)
+            self._dirty_pieces.add(pid)
+        return True
 
     def _try_rotate(self, player_id: str, piece: PieceState, direction: int) -> bool:
         """Try to rotate a piece, using wall kicks if needed."""
         new_piece = piece.rotated(direction)
+        self._release_cells(player_id)
 
-        # Try the basic rotation first
-        if self.board.is_valid_position(new_piece):
-            self.active_pieces[player_id] = new_piece
-            self._dirty_pieces.add(player_id)
-            return True
+        candidates = [new_piece]
+        for dr, dc in get_wall_kicks(piece.piece_type, piece.rotation, new_piece.rotation):
+            candidates.append(new_piece.moved(dr, dc))
 
-        # Try wall kicks
-        kicks = get_wall_kicks(piece.piece_type, piece.rotation, new_piece.rotation)
-        for d_row, d_col in kicks:
-            kicked = new_piece.moved(d_row, d_col)
-            if self.board.is_valid_position(kicked):
-                self.active_pieces[player_id] = kicked
+        for candidate in candidates:
+            if self._can_place(player_id, candidate):
+                self.active_pieces[player_id] = candidate
+                self._claim_cells(player_id, candidate)
                 self._dirty_pieces.add(player_id)
                 return True
 
+        # All rotations blocked — restore original
+        self._claim_cells(player_id, piece)
         return False
 
     def _hard_drop(self, player_id: str, piece: PieceState) -> bool:
-        """Drop a piece straight down until it can't go further, then lock it."""
+        """Drop a piece straight down until it can't go further. Locks if it
+        landed on the floor or a locked cell; otherwise rests on the active
+        piece below and will fall with it on the next tick.
+        """
+        self._release_cells(player_id)
         current = piece
         while True:
             next_pos = current.moved(1, 0)
-            if not self.board.is_valid_position(next_pos):
+            if not self._can_place(player_id, next_pos):
                 break
             current = next_pos
 
         self.active_pieces[player_id] = current
-        self._lock_piece(player_id)
+        self._claim_cells(player_id, current)
+        self._dirty_pieces.add(player_id)
+        # Don't lock if the only thing stopping us is another active piece.
+        below = current.moved(1, 0)
+        if not self._blocked_only_by_active(player_id, below):
+            self._lock_piece(player_id)
         return True
 
     def _lock_piece(self, player_id: str) -> None:
@@ -189,7 +303,9 @@ class GameEngine:
         if piece is None:
             return
 
-        # Track locked cells as dirty
+        # The piece's cells move from "active" (collision via _active_cell_owners)
+        # to "locked" (collision via the board grid).
+        self._release_cells(player_id)
         for cell in get_cells(piece):
             self._dirty_cells.add((cell.row, cell.col))
 
@@ -216,17 +332,32 @@ class GameEngine:
         Pieces that can't move down get locked into the board. Players who
         are missing an active piece (because their last spawn was blocked)
         get a retry attempt.
-        """
-        # Collect which players need to be locked (can't move down)
-        to_lock: list[str] = []
 
-        for player_id, piece in self.active_pieces.items():
+        Bottom-most pieces are processed first so a stack of falling pieces
+        can all advance in one tick — otherwise the lowest piece would block
+        the one above it on this tick, locking it prematurely.
+        """
+        # Sort by bottom row of each piece, descending
+        order = sorted(
+            self.active_pieces.items(),
+            key=lambda kv: max(c.row for c in get_cells(kv[1])),
+            reverse=True,
+        )
+
+        to_lock: list[str] = []
+        for player_id, piece in order:
             new_piece = piece.moved(1, 0)
-            if self.board.is_valid_position(new_piece):
+            self._release_cells(player_id)
+            if self._can_place(player_id, new_piece):
                 self.active_pieces[player_id] = new_piece
+                self._claim_cells(player_id, new_piece)
                 self._dirty_pieces.add(player_id)
             else:
-                to_lock.append(player_id)
+                self._claim_cells(player_id, piece)
+                # Only lock if we hit something solid. If we're resting on
+                # another active piece, wait — it may fall this tick or next.
+                if not self._blocked_only_by_active(player_id, new_piece):
+                    to_lock.append(player_id)
 
         # Lock pieces that couldn't move down
         for player_id in to_lock:
@@ -237,12 +368,14 @@ class GameEngine:
             if player_id not in self.active_pieces:
                 self.spawn_piece(player_id)
 
-    def _ghost_position(self, piece: PieceState) -> PieceState:
-        """Calculate where a piece would land if hard-dropped (ghost piece)."""
+    def _ghost_position(self, player_id: str, piece: PieceState) -> PieceState:
+        """Calculate where a piece would land if hard-dropped (ghost piece).
+        Stops at other players' active pieces too, not just the locked grid.
+        """
         current = piece
         while True:
             next_pos = current.moved(1, 0)
-            if not self.board.is_valid_position(next_pos):
+            if not self._can_place(player_id, next_pos):
                 return current
             current = next_pos
 
@@ -256,7 +389,7 @@ class GameEngine:
             "next_piece": next_type.value if next_type else None,
         }
         if include_ghost:
-            ghost = self._ghost_position(piece)
+            ghost = self._ghost_position(player_id, piece)
             payload["ghost_cells"] = [{"row": c.row, "col": c.col} for c in get_cells(ghost)]
         return payload
 
