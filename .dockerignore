@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.claude
+.context
+__pycache__
+*.pyc
+tests
+tetris
+main.py
+pygbag.ini
+README.md
+.python-version
+deno.json
+deno.lock
