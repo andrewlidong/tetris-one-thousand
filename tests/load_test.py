@@ -36,12 +36,9 @@ async def player(url: str, player_num: int, duration: float, stats: Stats, actio
         ws = await websockets.connect(url)
         stats.connect_time = max(stats.connect_time, time.monotonic() - t0)
 
-        # Consume welcome + initial state + connect delta
-        for _ in range(3):
-            try:
-                await asyncio.wait_for(ws.recv(), timeout=5.0)
-            except Exception:
-                break
+        # Consume welcome + initial state (server sends exactly these on connect)
+        for _ in range(2):
+            await asyncio.wait_for(ws.recv(), timeout=5.0)
 
         end_time = time.monotonic() + duration
 
@@ -114,10 +111,10 @@ async def run_load_test(url: str, num_players: int, duration: float, ramp_time: 
 
 def main():
     parser = argparse.ArgumentParser(description="Tetris 1000 load test")
-    parser.add_argument("--players", type=int, default=100, help="Number of concurrent players")
+    parser.add_argument("--players", type=int, default=1000, help="Number of concurrent players")
     parser.add_argument("--duration", type=float, default=30, help="Test duration in seconds")
     parser.add_argument("--url", default="ws://localhost:8000/ws", help="WebSocket URL")
-    parser.add_argument("--ramp", type=float, default=5.0, help="Ramp-up time in seconds")
+    parser.add_argument("--ramp", type=float, default=30.0, help="Ramp-up time in seconds")
     args = parser.parse_args()
 
     asyncio.run(run_load_test(args.url, args.players, args.duration, args.ramp))

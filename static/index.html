@@ -206,7 +206,20 @@ function applyDelta(msg) {
     }
   }
 
-  activePieces = msg.active_pieces;
+  // Initial state ('state') sends a full active_pieces dict; deltas send partials.
+  if (msg.active_pieces) {
+    activePieces = msg.active_pieces;
+  }
+  if (msg.pieces_delta) {
+    for (const pid in msg.pieces_delta) {
+      activePieces[pid] = msg.pieces_delta[pid];
+    }
+  }
+  if (msg.removed_pieces) {
+    for (const pid of msg.removed_pieces) {
+      delete activePieces[pid];
+    }
+  }
   gameOver = msg.game_over;
 }
 

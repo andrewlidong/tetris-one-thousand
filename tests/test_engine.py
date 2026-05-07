@@ -135,15 +135,17 @@ def test_rotate():
         assert engine.active_pieces["p1"].rotation == (rot_before + 1) % 4
 
 
-def test_game_over_flag():
-    engine = GameEngine(width=10, height=6)
+def test_spawn_returns_none_when_blocked():
+    """When the spawn area is full, spawn_piece returns None instead of
+    setting a global game_over (so one player's top-out doesn't freeze a
+    1000-player session)."""
+    engine = GameEngine(width=20, height=6)
     engine.add_player("p1")
-    # Fill board to trigger game over
-    for row in range(6):
-        for col in range(10):
+    # Fill the entire board so any spawn position collides
+    for row in range(engine.board.height):
+        for col in range(engine.board.width):
             engine.board.grid[row][col] = 1  # type: ignore[assignment]
     engine.active_pieces.pop("p1")
-    # Trying to spawn should fail
     result = engine.spawn_piece("p1")
     assert result is None
-    assert engine.game_over
+    assert not engine.game_over  # cooperative server: never globally over

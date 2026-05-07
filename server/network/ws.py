@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 
@@ -27,16 +28,27 @@ class ConnectionManager:
         return len(self.connections)
 
     async def broadcast(self, data: dict) -> None:
-        """Send JSON data to all connected clients. Silently drop failed sends."""
+        """Send JSON data to all connected clients in parallel.
+
+        Sends are dispatched concurrently with asyncio.gather so one slow
+        client doesn't block the rest. Failed sockets are dropped.
+        """
+        if not self.connections:
+            return
         message = json.dumps(data)
-        stale: list[WebSocket] = []
-        for ws in self.connections:
+        sockets = list(self.connections.keys())
+
+        async def send_one(ws: WebSocket) -> WebSocket | None:
             try:
                 await ws.send_text(message)
+                return None
             except Exception:
-                stale.append(ws)
-        for ws in stale:
-            self.connections.pop(ws, None)
+                return ws
+
+        results = await asyncio.gather(*(send_one(ws) for ws in sockets))
+        for ws in results:
+            if ws is not None:
+                self.connections.pop(ws, None)
 
     async def send_to(self, ws: WebSocket, data: dict) -> None:
         try:

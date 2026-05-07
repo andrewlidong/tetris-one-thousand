@@ -49,8 +49,10 @@ class GameEngine:
         self.score: int = 0
         self.lines_cleared: int = 0
         self.game_over: bool = False
-        # Delta tracking: cells that changed since last get_delta() call
+        # Delta tracking: cells / pieces that changed since last get_delta() call
         self._dirty_cells: set[tuple[int, int]] = set()
+        self._dirty_pieces: set[str] = set()
+        self._removed_players: set[str] = set()
         self._prev_grid_width: int = width
 
     @property
@@ -80,40 +82,42 @@ class GameEngine:
 
     def remove_player(self, player_id: str) -> None:
         """Remove a player and their active piece from the game."""
+        if player_id in self.active_pieces or player_id in self.bags:
+            self._removed_players.add(player_id)
+            self._dirty_pieces.discard(player_id)
         self.active_pieces.pop(player_id, None)
         self.bags.pop(player_id, None)
         self.next_pieces.pop(player_id, None)
 
     def spawn_piece(self, player_id: str) -> PieceState | None:
-        """Spawn a new piece for the given player at a spread-out column."""
-        if self.game_over:
-            return None
+        """Spawn a new piece for the given player at a spread-out column.
 
+        Tries a few random columns to find a clear spawn slot. If all are
+        blocked, returns None — the player will just be without a piece for
+        this tick, and the gravity loop will retry next tick. No global game
+        over: one player's spawn problem doesn't freeze a 1000-player session.
+        """
         bag = self.bags.get(player_id)
         if bag is None:
             return None
 
-        # Use the pre-generated next piece, then generate a new next
-        piece_type = self.next_pieces.get(player_id, bag.next())
-        self.next_pieces[player_id] = bag.next()
-
-        # Pick a random spawn column, leaving room for the piece (max width 4)
         max_col = max(0, self.board.width - 4)
-        col = random.randint(0, max_col)
+        # Try the pre-generated piece at several random columns first.
+        piece_type = self.next_pieces.get(player_id, bag.next())
+        for _ in range(5):
+            col = random.randint(0, max_col)
+            piece = PieceState(
+                piece_type=piece_type,
+                position=Position(SPAWN_TOP_ROW, col),
+                rotation=0,
+            )
+            if self.board.is_valid_position(piece):
+                self.next_pieces[player_id] = bag.next()
+                self.active_pieces[player_id] = piece
+                self._dirty_pieces.add(player_id)
+                return piece
 
-        piece = PieceState(
-            piece_type=piece_type,
-            position=Position(SPAWN_TOP_ROW, col),
-            rotation=0,
-        )
-
-        # If the spawn position is blocked, the game is over
-        if not self.board.is_valid_position(piece):
-            self.game_over = True
-            return None
-
-        self.active_pieces[player_id] = piece
-        return piece
+        return None
 
     def process_action(self, player_id: str, action: Action) -> bool:
         """Process a player's action on their piece. Returns True if the action succeeded."""
@@ -141,6 +145,7 @@ class GameEngine:
         new_piece = piece.moved(d_row, d_col)
         if self.board.is_valid_position(new_piece):
             self.active_pieces[player_id] = new_piece
+            self._dirty_pieces.add(player_id)
             return True
         return False
 
@@ -151,6 +156,7 @@ class GameEngine:
         # Try the basic rotation first
         if self.board.is_valid_position(new_piece):
             self.active_pieces[player_id] = new_piece
+            self._dirty_pieces.add(player_id)
             return True
 
         # Try wall kicks
@@ -159,6 +165,7 @@ class GameEngine:
             kicked = new_piece.moved(d_row, d_col)
             if self.board.is_valid_position(kicked):
                 self.active_pieces[player_id] = kicked
+                self._dirty_pieces.add(player_id)
                 return True
 
         return False
@@ -198,21 +205,18 @@ class GameEngine:
                 for c in range(self.board.width):
                     self._dirty_cells.add((r, c))
 
-        if self.board.is_topped_out():
-            self.game_over = True
-            self.active_pieces.pop(player_id, None)
-            return
-
+        # Try to spawn a new piece. If blocked (board full at the top), the
+        # player just sits this tick out — the gravity loop retries next tick.
+        self.active_pieces.pop(player_id, None)
         self.spawn_piece(player_id)
 
     def tick(self) -> None:
         """Apply gravity: move all active pieces down one row.
 
-        Pieces that can't move down get locked into the board.
+        Pieces that can't move down get locked into the board. Players who
+        are missing an active piece (because their last spawn was blocked)
+        get a retry attempt.
         """
-        if self.game_over:
-            return
-
         # Collect which players need to be locked (can't move down)
         to_lock: list[str] = []
 
@@ -220,12 +224,18 @@ class GameEngine:
             new_piece = piece.moved(1, 0)
             if self.board.is_valid_position(new_piece):
                 self.active_pieces[player_id] = new_piece
+                self._dirty_pieces.add(player_id)
             else:
                 to_lock.append(player_id)
 
         # Lock pieces that couldn't move down
         for player_id in to_lock:
             self._lock_piece(player_id)
+
+        # Retry spawning for any waiting players (blocked from spawning earlier)
+        for player_id in list(self.bags):
+            if player_id not in self.active_pieces:
+                self.spawn_piece(player_id)
 
     def _ghost_position(self, piece: PieceState) -> PieceState:
         """Calculate where a piece would land if hard-dropped (ghost piece)."""
@@ -236,27 +246,39 @@ class GameEngine:
                 return current
             current = next_pos
 
-    def _build_active_pieces(self) -> dict:
-        active = {}
-        for player_id, piece in self.active_pieces.items():
-            cells = get_cells(piece)
+    def piece_payload(self, player_id: str, piece: PieceState, include_ghost: bool = False) -> dict:
+        cells = get_cells(piece)
+        next_type = self.next_pieces.get(player_id)
+        payload = {
+            "piece_type": piece.piece_type.value,
+            "cells": [{"row": c.row, "col": c.col} for c in cells],
+            "rotation": piece.rotation,
+            "next_piece": next_type.value if next_type else None,
+        }
+        if include_ghost:
             ghost = self._ghost_position(piece)
-            ghost_cells = get_cells(ghost)
-            next_type = self.next_pieces.get(player_id)
-            active[player_id] = {
-                "piece_type": piece.piece_type.value,
-                "cells": [{"row": c.row, "col": c.col} for c in cells],
-                "ghost_cells": [{"row": c.row, "col": c.col} for c in ghost_cells],
-                "rotation": piece.rotation,
-                "next_piece": next_type.value if next_type else None,
-            }
+            payload["ghost_cells"] = [{"row": c.row, "col": c.col} for c in get_cells(ghost)]
+        return payload
+
+    def _build_active_pieces(self, player_ids=None, include_ghost: bool = False) -> dict:
+        """Build active piece payloads. Ghost cells are only rendered for the
+        local player, so by default they're omitted from broadcast deltas to
+        save 30+ collision checks per piece per tick.
+        """
+        ids = player_ids if player_ids is not None else self.active_pieces.keys()
+        active = {}
+        for player_id in ids:
+            piece = self.active_pieces.get(player_id)
+            if piece is None:
+                continue
+            active[player_id] = self.piece_payload(player_id, piece, include_ghost=include_ghost)
         return active
 
     def get_state(self) -> dict:
         """Full state snapshot (sent to new connections)."""
         return {
             "grid": self.board.get_grid_snapshot(),
-            "active_pieces": self._build_active_pieces(),
+            "active_pieces": self._build_active_pieces(include_ghost=True),
             "score": self.score,
             "lines_cleared": self.lines_cleared,
             "board_width": self.board.width,
@@ -265,32 +287,44 @@ class GameEngine:
             "game_over": self.game_over,
         }
 
-    def get_delta(self) -> dict:
-        """Delta state — only changed grid cells + all active pieces.
+    def get_delta(self) -> dict | None:
+        """Delta state — only what changed since last call.
 
-        Returns a dict with 'grid_delta' (list of [row, col, color]) instead
-        of the full grid. Also includes board_width if it changed.
-        Clears the dirty set after building the delta.
+        Includes:
+          - 'grid_delta': list of [row, col, color] for changed cells
+          - 'pieces_delta': dict of player_id -> piece payload, only changed pieces
+          - 'removed_pieces': list of player_ids whose pieces should be dropped
+        Returns None if nothing changed (so the broadcast loop can skip the send).
         """
-        delta: list[list[int]] = []
+        cells: list[list[int]] = []
         for r, c in self._dirty_cells:
             if 0 <= r < self.board.height and 0 <= c < self.board.width:
-                delta.append([r, c, int(self.board.grid[r][c])])
+                cells.append([r, c, int(self.board.grid[r][c])])
         self._dirty_cells.clear()
 
+        pieces = self._build_active_pieces(self._dirty_pieces)
+        removed = list(self._removed_players)
+        self._dirty_pieces.clear()
+        self._removed_players.clear()
+
+        width_changed = self.board.width != self._prev_grid_width
+
+        if not cells and not pieces and not removed and not width_changed:
+            return None
+
         result: dict = {
-            "active_pieces": self._build_active_pieces(),
             "score": self.score,
             "lines_cleared": self.lines_cleared,
             "player_count": self.player_count,
             "game_over": self.game_over,
         }
-
-        if delta:
-            result["grid_delta"] = delta
-
-        # If board expanded, tell the client
-        if self.board.width != self._prev_grid_width:
+        if cells:
+            result["grid_delta"] = cells
+        if pieces:
+            result["pieces_delta"] = pieces
+        if removed:
+            result["removed_pieces"] = removed
+        if width_changed:
             result["board_width"] = self.board.width
             result["board_height"] = self.board.height
             self._prev_grid_width = self.board.width

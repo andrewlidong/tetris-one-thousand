@@ -3,4 +3,5 @@ BOARD_MIN_WIDTH = 20
 BOARD_MAX_WIDTH = 500
 COLUMNS_PER_PLAYER = 2
 TICK_RATE = 0.5  # seconds between gravity ticks
+BROADCAST_RATE = 15  # state-delta broadcasts per second (Hz)
 SPAWN_TOP_ROW = 0  # row where new pieces appear
