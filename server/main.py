@@ -21,8 +21,6 @@ async def game_loop() -> None:
     """Tick the engine at a fixed rate and broadcast deltas to all players."""
     while True:
         await asyncio.sleep(TICK_RATE)
-        if engine.game_over:
-            continue
         engine.tick()
         delta = engine.get_delta()
         await manager.broadcast({"type": "delta", **delta})
@@ -48,7 +46,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     player_id = await manager.connect(ws)
 
     # Add the player to the game engine
-    piece = engine.add_player(player_id)
+    engine.add_player(player_id)
 
     # Send welcome + full state to the new player
     await manager.send_to(ws, {
@@ -64,6 +62,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     try:
         while True:
             data = await ws.receive_json()
+
+            # Players can (re)name themselves at any time
+            name = data.get("name")
+            if isinstance(name, str):
+                engine.set_name(player_id, name)
+                delta = engine.get_delta()
+                await manager.broadcast({"type": "delta", **delta})
+                continue
+
             action_str = data.get("action")
             if action_str is None:
                 continue

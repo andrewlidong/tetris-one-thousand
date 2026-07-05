@@ -1,5 +1,37 @@
 # Tetris
 
+Two games in one repo:
+
+1. **Multiplayer Tetris** (`server/` + `static/`) — one giant shared board for
+   up to 1000 players, over WebSockets. See [Multiplayer](#multiplayer).
+2. **Single-player Tetris** (`tetris/`) — modern guideline Tetris with
+   `pygame-ce`, also compiled to WebAssembly for the browser.
+
+## Multiplayer
+
+Everyone plays on the *same* board, which grows wider as players join. Each
+player has their own falling piece; line clears credit the player who locked
+the completing piece. When the board tops out it wipes and a new round starts —
+scores and players carry over, so the game never ends.
+
+Features: 7-bag randomizer, SRS rotation with wall kicks, ghost piece, hold
+queue, next preview, per-player leaderboard, DAS key repeat, delta broadcasts
+(only changed cells go over the wire), auto-reconnect.
+
+```sh
+uv sync
+uv run uvicorn server.main:app --port 8000
+# open http://localhost:8000 — one tab per player
+```
+
+Tests:
+
+```sh
+uv run pytest tests/
+```
+
+## Single-player
+
 Modern Tetris in Python with `pygame-ce`. Follows the Tetris Guideline: 7-bag,
 SRS rotation with kicks, hold, 5-piece preview, ghost piece, lock delay,
 soft/hard drop, T-spins, back-to-back, and combo scoring.

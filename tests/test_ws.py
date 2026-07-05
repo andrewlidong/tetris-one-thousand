@@ -94,6 +94,31 @@ def test_two_players():
             assert delta["player_count"] == 2
 
 
+def test_set_name_reflected_in_leaderboard():
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        welcome, _ = _consume_connect(ws)
+        my_id = welcome["player_id"]
+
+        ws.send_json({"name": "Andrew"})
+        msg = ws.receive_json()
+        assert msg["type"] == "delta"
+        names = {e["id"]: e["name"] for e in msg["leaderboard"]}
+        assert names[my_id] == "Andrew"
+
+
+def test_hold_action():
+    client = TestClient(app)
+    with client.websocket_connect("/ws") as ws:
+        welcome, _ = _consume_connect(ws)
+        my_id = welcome["player_id"]
+
+        ws.send_json({"action": "hold"})
+        msg = ws.receive_json()
+        assert msg["type"] == "delta"
+        assert msg["active_pieces"][my_id]["held_piece"] is not None
+
+
 def test_full_state_has_ghost_and_next():
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:
