@@ -12,6 +12,7 @@ class Action(str, Enum):
     ROTATE_CCW = "rotate_ccw"
     SOFT_DROP = "soft_drop"
     HARD_DROP = "hard_drop"
+    HOLD = "hold"
 
 
 class CellColor(IntEnum):

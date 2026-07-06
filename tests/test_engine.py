@@ -1,5 +1,5 @@
 from server.game.engine import Bag, GameEngine
-from server.game.types import Action, PieceType
+from server.game.types import Action, PieceState, PieceType, Position
 
 
 def test_bag_returns_all_types():
@@ -97,10 +97,9 @@ def test_tick_locks_piece_at_bottom():
     # Move piece near the bottom
     for _ in range(20):
         engine.tick()
-    # After enough ticks, piece should have locked and a new one spawned
+    # After enough ticks, the piece should have locked and a new one spawned
     piece = engine.active_pieces.get("p1")
-    # Either the player has a new piece at the top, or the game is over
-    assert piece is None or piece.position.row < 5 or engine.game_over
+    assert piece is not None
 
 
 def test_multiple_players():
@@ -135,15 +134,124 @@ def test_rotate():
         assert engine.active_pieces["p1"].rotation == (rot_before + 1) % 4
 
 
-def test_game_over_flag():
+def test_jammed_spawn_starts_new_round():
+    """When no spawn column is free, the board wipes and a new round begins."""
     engine = GameEngine(width=10, height=6)
     engine.add_player("p1")
-    # Fill board to trigger game over
-    for row in range(6):
-        for col in range(10):
+    # Fill the whole board so nothing can spawn
+    # (add_player may have expanded the board to BOARD_MIN_WIDTH)
+    for row in range(engine.board.height):
+        for col in range(engine.board.width):
             engine.board.grid[row][col] = 1  # type: ignore[assignment]
     engine.active_pieces.pop("p1")
-    # Trying to spawn should fail
+
     result = engine.spawn_piece("p1")
-    assert result is None
-    assert engine.game_over
+
+    assert result is not None  # spawned on the freshly wiped board
+    assert engine.round == 2
+    # Board is empty again (except nothing has locked yet)
+    assert all(cell == 0 for row in engine.board.grid for cell in row)
+
+
+def test_topout_starts_new_round_and_keeps_players():
+    engine = GameEngine(width=10, height=6)
+    engine.add_player("p1")
+    engine.scores["p1"] = 500
+    # Fill the top rows (below the spawn area is irrelevant — top 4 rows trigger it)
+    for row in range(4):
+        for col in range(10):
+            engine.board.grid[row][col] = 1  # type: ignore[assignment]
+
+    engine._lock_piece("p1")
+
+    assert engine.round == 2
+    assert "p1" in engine.active_pieces  # respawned, not eliminated
+    assert engine.scores["p1"] == 500  # score survives the reset
+
+
+def test_round_reset_flag_in_delta():
+    engine = GameEngine(width=10, height=6)
+    engine.add_player("p1")
+    engine._reset_round()
+    delta = engine.get_delta()
+    assert delta["round_reset"] is True
+    assert delta["round"] == 2
+    # Flag is consumed — next delta doesn't repeat it
+    assert "round_reset" not in engine.get_delta()
+
+
+def test_hold_swaps_piece():
+    engine = GameEngine(width=20)
+    engine.add_player("p1")
+    original_type = engine.active_pieces["p1"].piece_type
+
+    result = engine.process_action("p1", Action.HOLD)
+
+    assert result is True
+    assert engine.held_pieces["p1"] == original_type
+    assert "p1" in engine.active_pieces  # a replacement piece spawned
+
+
+def test_hold_only_once_per_piece():
+    engine = GameEngine(width=20)
+    engine.add_player("p1")
+    assert engine.process_action("p1", Action.HOLD) is True
+    # Second hold before locking is rejected
+    assert engine.process_action("p1", Action.HOLD) is False
+    # After the piece locks, holding is allowed again
+    engine.process_action("p1", Action.HARD_DROP)
+    assert engine.process_action("p1", Action.HOLD) is True
+
+
+def test_hold_returns_previously_held_piece():
+    engine = GameEngine(width=20)
+    engine.add_player("p1")
+    first_type = engine.active_pieces["p1"].piece_type
+    engine.process_action("p1", Action.HOLD)
+    engine.process_action("p1", Action.HARD_DROP)  # lock, re-enabling hold
+    engine.process_action("p1", Action.HOLD)
+    # The piece we get back is the one we stashed first
+    assert engine.active_pieces["p1"].piece_type == first_type
+
+
+def test_line_clear_credits_locking_player():
+    engine = GameEngine(width=20, height=10)
+    engine.add_player("p1")
+    # Fill the bottom row except columns 0-3, then drop a flat I piece there
+    for col in range(4, 20):
+        engine.board.grid[9][col] = 1  # type: ignore[assignment]
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.I, position=Position(0, 0), rotation=0
+    )
+
+    engine.process_action("p1", Action.HARD_DROP)
+
+    assert engine.lines_cleared == 1
+    assert engine.scores["p1"] == 100  # personal credit
+    assert engine.score == 100  # team score too
+
+
+def test_set_name_trims_and_caps():
+    engine = GameEngine(width=20)
+    engine.add_player("p1", name="  Andrew  ")
+    assert engine.names["p1"] == "Andrew"
+    engine.set_name("p1", "x" * 50)
+    assert len(engine.names["p1"]) == 16
+    # Blank names are ignored, keeping the old one
+    engine.set_name("p1", "   ")
+    assert len(engine.names["p1"]) == 16
+
+
+def test_leaderboard_sorted_and_capped():
+    engine = GameEngine(width=100)
+    for i in range(15):
+        engine.add_player(f"p{i}", name=f"player{i}")
+        engine.scores[f"p{i}"] = i * 10
+
+    state = engine.get_state()
+    board = state["leaderboard"]
+
+    assert len(board) == 10  # capped at LEADERBOARD_SIZE
+    scores = [entry["score"] for entry in board]
+    assert scores == sorted(scores, reverse=True)
+    assert board[0]["name"] == "player14"

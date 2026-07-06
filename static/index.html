@@ -45,7 +45,7 @@ canvas {
   display: block;
 }
 #sidebar {
-  width: 100px;
+  width: 150px;
   background: #1a1a1a;
   padding: 0.5rem;
   display: flex;
@@ -53,6 +53,7 @@ canvas {
   align-items: center;
   gap: 0.5rem;
   border-left: 1px solid #333;
+  overflow-y: auto;
 }
 #sidebar h3 {
   font-size: 0.7rem;
@@ -60,10 +61,27 @@ canvas {
   letter-spacing: 1px;
   opacity: 0.5;
 }
-#next-canvas {
+#next-canvas, #hold-canvas {
   background: #000;
   border: 1px solid #333;
 }
+#leaderboard {
+  width: 100%;
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+#leaderboard .row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.3rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#leaderboard .row .lb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#leaderboard .row.me { color: #0ff; }
 #status {
   position: fixed;
   top: 50%;
@@ -74,6 +92,7 @@ canvas {
   display: none;
   text-align: center;
   z-index: 20;
+  text-shadow: 0 0 20px #000, 0 0 40px #000;
 }
 #controls {
   padding: 0.4rem;
@@ -81,13 +100,56 @@ canvas {
   opacity: 0.4;
   text-align: center;
 }
+#name-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  z-index: 50;
+}
+#name-modal h1 { color: #0ff; letter-spacing: 3px; }
+#name-input {
+  background: #000;
+  border: 1px solid #0ff;
+  color: #eee;
+  padding: 0.6rem 1rem;
+  font: inherit;
+  font-size: 1.1rem;
+  text-align: center;
+  width: 260px;
+  outline: none;
+}
+#name-btn {
+  background: #0ff;
+  color: #000;
+  border: none;
+  padding: 0.6rem 2.5rem;
+  font: inherit;
+  font-weight: bold;
+  font-size: 1rem;
+  cursor: pointer;
+  letter-spacing: 2px;
+}
+#name-btn:hover { background: #fff; }
 </style>
 </head>
 <body>
 
+<div id="name-modal">
+  <h1>TETRIS 1000</h1>
+  <input id="name-input" type="text" maxlength="16" placeholder="Your name" autocomplete="off" spellcheck="false">
+  <button id="name-btn">PLAY</button>
+</div>
+
 <div id="header">
   <span>Players: <strong id="hud-players">0</strong></span>
-  <span>Score: <strong id="hud-score">0</strong></span>
+  <span>Round: <strong id="hud-round">1</strong></span>
+  <span>My Score: <strong id="hud-myscore">0</strong></span>
+  <span>Team: <strong id="hud-score">0</strong></span>
   <span>Lines: <strong id="hud-lines">0</strong></span>
   <span>Board: <strong id="hud-size">0x0</strong></span>
 </div>
@@ -97,13 +159,17 @@ canvas {
     <canvas id="board"></canvas>
   </div>
   <div id="sidebar">
+    <h3>Hold</h3>
+    <canvas id="hold-canvas" width="80" height="48"></canvas>
     <h3>Next</h3>
-    <canvas id="next-canvas" width="80" height="64"></canvas>
+    <canvas id="next-canvas" width="80" height="48"></canvas>
+    <h3>Top Players</h3>
+    <div id="leaderboard"></div>
   </div>
 </div>
 
 <div id="status"></div>
-<div id="controls">Arrow keys: move &amp; soft drop | Z/X: rotate | Space: hard drop</div>
+<div id="controls">Arrows: move &amp; soft drop | Z/X: rotate | Space: hard drop | C/Shift: hold</div>
 
 <script>
 const CELL = 16;
@@ -119,8 +185,8 @@ const COLORS = [
 ];
 const PIECE_COLOR_MAP = { I: 1, O: 2, T: 3, S: 4, Z: 5, J: 6, L: 7 };
 
-// Next piece preview shapes (rotation 0)
-const NEXT_SHAPES = {
+// Piece preview shapes (rotation 0)
+const PREVIEW_SHAPES = {
   I: [[0,0],[0,1],[0,2],[0,3]],
   O: [[0,0],[0,1],[1,0],[1,1]],
   T: [[0,1],[1,0],[1,1],[1,2]],
@@ -134,10 +200,14 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
 const nextCtx = nextCanvas.getContext('2d');
+const holdCanvas = document.getElementById('hold-canvas');
+const holdCtx = holdCanvas.getContext('2d');
 const canvasWrap = document.getElementById('canvas-wrap');
 const statusEl = document.getElementById('status');
+const leaderboardEl = document.getElementById('leaderboard');
 
 let myPlayerId = null;
+let myName = '';
 let ws = null;
 
 // Client-side grid state (applied from full state + deltas)
@@ -145,7 +215,14 @@ let grid = [];
 let boardWidth = 0;
 let boardHeight = 0;
 let activePieces = {};
-let gameOver = false;
+let statusTimer = null;
+
+function showStatus(text, ms) {
+  statusEl.textContent = text;
+  statusEl.style.display = 'block';
+  clearTimeout(statusTimer);
+  if (ms) statusTimer = setTimeout(() => { statusEl.style.display = 'none'; }, ms);
+}
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -153,6 +230,7 @@ function connect() {
 
   ws.onopen = () => {
     statusEl.style.display = 'none';
+    if (myName) ws.send(JSON.stringify({ name: myName }));
   };
 
   ws.onmessage = (evt) => {
@@ -165,21 +243,24 @@ function connect() {
       boardWidth = msg.board_width;
       boardHeight = msg.board_height;
       activePieces = msg.active_pieces;
-      gameOver = msg.game_over;
       updateHUD(msg);
+      updateLeaderboard(msg.leaderboard);
       render();
       scrollToMyPiece();
     } else if (msg.type === 'delta') {
       applyDelta(msg);
       updateHUD(msg);
+      updateLeaderboard(msg.leaderboard);
+      if (msg.round_reset) {
+        showStatus(`BOARD FULL — ROUND ${msg.round}`, 2500);
+      }
       render();
       scrollToMyPiece();
     }
   };
 
   ws.onclose = () => {
-    statusEl.textContent = 'Disconnected. Reconnecting...';
-    statusEl.style.display = 'block';
+    showStatus('Disconnected. Reconnecting...');
     setTimeout(connect, 2000);
   };
 
@@ -207,7 +288,6 @@ function applyDelta(msg) {
   }
 
   activePieces = msg.active_pieces;
-  gameOver = msg.game_over;
 }
 
 function render() {
@@ -264,20 +344,27 @@ function render() {
     for (const cell of p.cells) {
       drawCell(ctx, cell.row, cell.col, color, isMe);
     }
+
+    // Name tag above other players' pieces
+    if (!isMe && p.name && p.cells.length) {
+      let minRow = Infinity, sumCol = 0;
+      for (const cell of p.cells) {
+        if (cell.row < minRow) minRow = cell.row;
+        sumCol += cell.col;
+      }
+      const x = (sumCol / p.cells.length + 0.5) * CELL;
+      const y = minRow * CELL - 3;
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(p.name, x, Math.max(y, 8));
+    }
   }
 
-  // Next piece preview
-  renderNextPiece();
-
-  // Game over overlay
-  if (gameOver) {
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#f00';
-    ctx.font = 'bold 24px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
-  }
+  // Sidebar previews
+  const me = activePieces[myPlayerId];
+  renderPreview(nextCtx, nextCanvas, me && me.next_piece);
+  renderPreview(holdCtx, holdCanvas, me && me.held_piece);
 }
 
 function drawCell(context, r, c, color, highlight) {
@@ -302,29 +389,42 @@ function drawGhostCell(context, r, c, color) {
   context.globalAlpha = 1.0;
 }
 
-function renderNextPiece() {
-  const myPiece = activePieces[myPlayerId];
-  nextCtx.fillStyle = '#000';
-  nextCtx.fillRect(0, 0, nextCanvas.width, nextCanvas.height);
+function renderPreview(context, cv, pieceType) {
+  context.fillStyle = '#000';
+  context.fillRect(0, 0, cv.width, cv.height);
+  if (!pieceType) return;
 
-  if (!myPiece || !myPiece.next_piece) return;
-
-  const shape = NEXT_SHAPES[myPiece.next_piece];
+  const shape = PREVIEW_SHAPES[pieceType];
   if (!shape) return;
 
-  const colorIdx = PIECE_COLOR_MAP[myPiece.next_piece] || 0;
+  const colorIdx = PIECE_COLOR_MAP[pieceType] || 0;
   const color = COLORS[colorIdx] || '#fff';
   const previewCell = 16;
-  // Center the preview
-  const offsetX = (nextCanvas.width - 4 * previewCell) / 2;
-  const offsetY = (nextCanvas.height - 2 * previewCell) / 2;
+  const offsetX = (cv.width - 4 * previewCell) / 2;
+  const offsetY = (cv.height - 2 * previewCell) / 2;
 
   for (const [r, c] of shape) {
     const x = offsetX + c * previewCell;
     const y = offsetY + r * previewCell;
-    nextCtx.fillStyle = color;
-    nextCtx.fillRect(x + 1, y + 1, previewCell - 2, previewCell - 2);
+    context.fillStyle = color;
+    context.fillRect(x + 1, y + 1, previewCell - 2, previewCell - 2);
   }
+}
+
+function updateLeaderboard(board) {
+  if (!board) return;
+  leaderboardEl.innerHTML = '';
+  board.forEach((entry, i) => {
+    const row = document.createElement('div');
+    row.className = 'row' + (entry.id === myPlayerId ? ' me' : '');
+    const name = document.createElement('span');
+    name.className = 'lb-name';
+    name.textContent = `${i + 1}. ${entry.name || '???'}`;
+    const score = document.createElement('span');
+    score.textContent = entry.score;
+    row.append(name, score);
+    leaderboardEl.appendChild(row);
+  });
 }
 
 function scrollToMyPiece() {
@@ -349,16 +449,23 @@ function scrollToMyPiece() {
 function updateHUD(state) {
   if (state.player_count !== undefined)
     document.getElementById('hud-players').textContent = state.player_count;
+  if (state.round !== undefined)
+    document.getElementById('hud-round').textContent = state.round;
   if (state.score !== undefined)
     document.getElementById('hud-score').textContent = state.score;
   if (state.lines_cleared !== undefined)
     document.getElementById('hud-lines').textContent = state.lines_cleared;
+  const me = state.active_pieces && state.active_pieces[myPlayerId];
+  if (me && me.score !== undefined)
+    document.getElementById('hud-myscore').textContent = me.score;
   const w = state.board_width || boardWidth;
   const h = state.board_height || boardHeight;
   if (w && h) document.getElementById('hud-size').textContent = `${w}x${h}`;
 }
 
-// Keyboard controls
+// ── Keyboard controls with DAS (Delayed Auto Shift) ──────────────────────
+// Holding left/right/down repeats the move after a short delay, like real
+// Tetris. Rotations, hard drop, and hold fire once per key press.
 const KEY_MAP = {
   ArrowLeft:  'left',
   ArrowRight: 'right',
@@ -367,20 +474,79 @@ const KEY_MAP = {
   KeyZ:       'rotate_ccw',
   KeyX:       'rotate_cw',
   Space:      'hard_drop',
+  KeyC:       'hold',
+  ShiftLeft:  'hold',
+  ShiftRight: 'hold',
 };
+const DAS_ACTIONS = new Set(['left', 'right', 'soft_drop']);
+const DAS_DELAY = 170;   // ms before auto-repeat kicks in
+const DAS_REPEAT = 50;   // ms between repeats
+const dasTimers = {};    // action -> {delay, interval}
+
+function sendAction(action) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ action }));
+  }
+}
+
+function stopDas(action) {
+  const t = dasTimers[action];
+  if (t) {
+    clearTimeout(t.delay);
+    clearInterval(t.interval);
+    delete dasTimers[action];
+  }
+}
 
 document.addEventListener('keydown', (e) => {
   const action = KEY_MAP[e.code];
-  if (action && ws && ws.readyState === WebSocket.OPEN) {
-    e.preventDefault();
-    ws.send(JSON.stringify({ action }));
+  if (!action) return;
+  e.preventDefault();
+  if (e.repeat) return;  // we do our own repeat
+
+  sendAction(action);
+
+  if (DAS_ACTIONS.has(action)) {
+    stopDas(action);
+    const t = { delay: null, interval: null };
+    t.delay = setTimeout(() => {
+      t.interval = setInterval(() => sendAction(action), DAS_REPEAT);
+    }, DAS_DELAY);
+    dasTimers[action] = t;
   }
 });
 
-// Start
-statusEl.textContent = 'Connecting...';
-statusEl.style.display = 'block';
-connect();
+document.addEventListener('keyup', (e) => {
+  const action = KEY_MAP[e.code];
+  if (action) stopDas(action);
+});
+
+// Safety: stop all repeats if the tab loses focus mid-keypress
+window.addEventListener('blur', () => {
+  for (const action of Object.keys(dasTimers)) stopDas(action);
+});
+
+// ── Name entry ────────────────────────────────────────────────────────────
+const nameModal = document.getElementById('name-modal');
+const nameInput = document.getElementById('name-input');
+const nameBtn = document.getElementById('name-btn');
+
+nameInput.value = localStorage.getItem('tetris-name') || '';
+
+function startGame() {
+  myName = nameInput.value.trim().slice(0, 16);
+  if (myName) localStorage.setItem('tetris-name', myName);
+  nameModal.style.display = 'none';
+  showStatus('Connecting...');
+  connect();
+}
+
+nameBtn.addEventListener('click', startGame);
+nameInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();  // don't trigger game controls while typing
+  if (e.key === 'Enter') startGame();
+});
+nameInput.focus();
 </script>
 </body>
 </html>
