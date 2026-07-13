@@ -14,7 +14,12 @@ body {
   flex-direction: column;
   align-items: center;
   height: 100vh;
+  height: 100dvh; /* mobile: exclude browser chrome from viewport height */
   overflow: hidden;
+  overscroll-behavior: none; /* no pull-to-refresh while playing */
+  touch-action: manipulation; /* no double-tap zoom on buttons */
+  user-select: none;
+  -webkit-user-select: none;
 }
 #header {
   display: flex;
@@ -100,6 +105,37 @@ canvas {
   opacity: 0.4;
   text-align: center;
 }
+#touch-controls {
+  display: none; /* shown via JS on touch devices */
+  width: 100%;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  background: #1a1a1a;
+  border-top: 1px solid #333;
+}
+#touch-controls .group {
+  display: flex;
+  gap: 0.4rem;
+  flex: 1;
+}
+#touch-controls button {
+  flex: 1;
+  min-width: 0; /* let buttons shrink so the bar always fits the screen */
+  min-height: 52px;
+  font: bold 1.3rem 'Courier New', monospace;
+  color: #eee;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  touch-action: none; /* button holds must not scroll the page */
+}
+#touch-controls button:active { background: #0ff; color: #000; }
+@media (max-width: 700px) {
+  #header { gap: 0.7rem; font-size: 0.7rem; flex-wrap: wrap; padding: 0.3rem; }
+  #sidebar { width: 96px; padding: 0.3rem; }
+  #controls { display: none; } /* keyboard hints are noise on touch */
+}
 #name-modal {
   position: fixed;
   inset: 0;
@@ -170,6 +206,22 @@ canvas {
 
 <div id="status"></div>
 <div id="controls">Arrows: move &amp; soft drop | Z/X: rotate | Space: hard drop | C/Shift: hold</div>
+
+<div id="touch-controls">
+  <div class="group">
+    <button data-action="left" aria-label="Move left">&#9664;</button>
+    <button data-action="right" aria-label="Move right">&#9654;</button>
+  </div>
+  <div class="group">
+    <button data-action="rotate_ccw" aria-label="Rotate counter-clockwise">&#8634;</button>
+    <button data-action="rotate_cw" aria-label="Rotate clockwise">&#8635;</button>
+    <button data-action="hold" aria-label="Hold piece">H</button>
+  </div>
+  <div class="group">
+    <button data-action="soft_drop" aria-label="Soft drop">&#9660;</button>
+    <button data-action="hard_drop" aria-label="Hard drop">&#10515;</button>
+  </div>
+</div>
 
 <script>
 const CELL = 16;
@@ -498,6 +550,15 @@ function stopDas(action) {
   }
 }
 
+function startDas(action) {
+  stopDas(action);
+  const t = { delay: null, interval: null };
+  t.delay = setTimeout(() => {
+    t.interval = setInterval(() => sendAction(action), DAS_REPEAT);
+  }, DAS_DELAY);
+  dasTimers[action] = t;
+}
+
 document.addEventListener('keydown', (e) => {
   const action = KEY_MAP[e.code];
   if (!action) return;
@@ -505,15 +566,7 @@ document.addEventListener('keydown', (e) => {
   if (e.repeat) return;  // we do our own repeat
 
   sendAction(action);
-
-  if (DAS_ACTIONS.has(action)) {
-    stopDas(action);
-    const t = { delay: null, interval: null };
-    t.delay = setTimeout(() => {
-      t.interval = setInterval(() => sendAction(action), DAS_REPEAT);
-    }, DAS_DELAY);
-    dasTimers[action] = t;
-  }
+  if (DAS_ACTIONS.has(action)) startDas(action);
 });
 
 document.addEventListener('keyup', (e) => {
@@ -524,6 +577,40 @@ document.addEventListener('keyup', (e) => {
 // Safety: stop all repeats if the tab loses focus mid-keypress
 window.addEventListener('blur', () => {
   for (const action of Object.keys(dasTimers)) stopDas(action);
+});
+
+// ── Touch controls ────────────────────────────────────────────────────────
+// Buttons appear on touch devices. Holding ◀ ▶ ▼ auto-repeats via the same
+// DAS timers as the keyboard.
+const touchControls = document.getElementById('touch-controls');
+const isTouch = window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+if (isTouch) touchControls.style.display = 'flex';
+
+for (const btn of touchControls.querySelectorAll('button')) {
+  const action = btn.dataset.action;
+  btn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    sendAction(action);
+    if (DAS_ACTIONS.has(action)) startDas(action);
+  });
+  for (const evt of ['pointerup', 'pointercancel', 'pointerleave']) {
+    btn.addEventListener(evt, () => stopDas(action));
+  }
+  // Suppress the synthetic click / context menu on long-press
+  btn.addEventListener('click', (e) => e.preventDefault());
+  btn.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+// Tapping the board rotates clockwise (a quick tap, not a scroll drag)
+let tapStart = null;
+canvas.addEventListener('pointerdown', (e) => {
+  tapStart = { x: e.clientX, y: e.clientY, t: Date.now() };
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (!tapStart || !isTouch) return;
+  const moved = Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y);
+  if (moved < 10 && Date.now() - tapStart.t < 300) sendAction('rotate_cw');
+  tapStart = null;
 });
 
 // ── Name entry ────────────────────────────────────────────────────────────
