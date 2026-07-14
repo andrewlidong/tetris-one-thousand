@@ -51,7 +51,9 @@ def test_websocket_send_action():
     with client.websocket_connect("/ws") as ws:
         _consume_connect(ws)
 
-        ws.send_json({"action": "left"})
+        # soft_drop always succeeds right after spawn (left/right can fail at
+        # a wall, and failed actions no longer broadcast)
+        ws.send_json({"action": "soft_drop"})
         msg = ws.receive_json()
         assert msg["type"] == "delta"
         assert "active_pieces" in msg
@@ -74,7 +76,7 @@ def test_websocket_invalid_action_ignored():
         _consume_connect(ws)
 
         ws.send_json({"action": "invalid_action"})
-        ws.send_json({"action": "left"})
+        ws.send_json({"action": "soft_drop"})
         msg = ws.receive_json()
         assert msg["type"] == "delta"
 

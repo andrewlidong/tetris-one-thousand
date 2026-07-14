@@ -18,6 +18,8 @@ from ..config import (
     BOARD_MAX_WIDTH,
     BOARD_MIN_WIDTH,
     COLUMNS_PER_PLAYER,
+    GROUNDED_TICKS_TO_LOCK,
+    IDLE_TICKS_BEFORE_REMOVE,
     LEADERBOARD_SIZE,
     MAX_NAME_LENGTH,
     SPAWN_TOP_ROW,
@@ -60,6 +62,12 @@ class GameEngine:
         self.round: int = 1
         # Set when the board topped out and was wiped; popped into the next delta
         self._round_just_reset: bool = False
+        # Lock delay: consecutive ticks each piece has rested on the ground
+        self._grounded_ticks: dict[str, int] = {}
+        # Idle tracking: ticks since each player's last action
+        self.idle_ticks: dict[str, int] = {}
+        # Rows cleared since the last delta (for the client's flash animation)
+        self._pending_cleared_rows: list[int] = []
         # Delta tracking: cells that changed since last get_delta() call
         self._dirty_cells: set[tuple[int, int]] = set()
         self._prev_grid_width: int = width
@@ -99,6 +107,8 @@ class GameEngine:
         self.hold_used.pop(player_id, None)
         self.names.pop(player_id, None)
         self.scores.pop(player_id, None)
+        self._grounded_ticks.pop(player_id, None)
+        self.idle_ticks.pop(player_id, None)
 
     def set_name(self, player_id: str, name: str) -> None:
         """Set a player's display name (trimmed, length-capped)."""
@@ -134,6 +144,7 @@ class GameEngine:
             return None
 
         self.active_pieces[player_id] = piece
+        self._grounded_ticks.pop(player_id, None)  # fresh piece, fresh lock delay
         return piece
 
     def _find_spawn(self, piece_type: PieceType) -> PieceState | None:
@@ -163,9 +174,18 @@ class GameEngine:
 
     def process_action(self, player_id: str, action: Action) -> bool:
         """Process a player's action on their piece. Returns True if the action succeeded."""
+        if player_id not in self.bags:
+            return False
+
+        # Any input marks the player active again
+        self.idle_ticks[player_id] = 0
+
         piece = self.active_pieces.get(player_id)
         if piece is None:
-            return False
+            # Piece was removed for idleness — any input brings the player back
+            piece = self.spawn_piece(player_id)
+            if piece is None:
+                return False
 
         if action == Action.MOVE_LEFT:
             return self._try_move(player_id, piece, 0, -1)
@@ -255,8 +275,10 @@ class GameEngine:
 
         self.board.lock_piece(piece)
 
-        cleared = self.board.clear_lines()
+        cleared_rows = self.board.clear_lines()
+        cleared = len(cleared_rows)
         if cleared > 0:
+            self._pending_cleared_rows.extend(cleared_rows)
             self.lines_cleared += cleared
             points = {1: 100, 2: 300, 3: 500, 4: 800}
             earned = points.get(cleared, cleared * 200)
@@ -279,21 +301,36 @@ class GameEngine:
     def tick(self) -> None:
         """Apply gravity: move all active pieces down one row.
 
-        Pieces that can't move down get locked into the board.
+        A piece that can't move down isn't locked immediately — it gets
+        GROUNDED_TICKS_TO_LOCK ticks of grace (lock delay) so the player can
+        still slide or rotate it. Moving off a ledge resets the grace.
         """
-        # Collect which players need to be locked (can't move down)
         to_lock: list[str] = []
 
         for player_id, piece in self.active_pieces.items():
             new_piece = piece.moved(1, 0)
             if self.board.is_valid_position(new_piece):
                 self.active_pieces[player_id] = new_piece
+                self._grounded_ticks.pop(player_id, None)
             else:
-                to_lock.append(player_id)
+                grounded = self._grounded_ticks.get(player_id, 0) + 1
+                self._grounded_ticks[player_id] = grounded
+                if grounded >= GROUNDED_TICKS_TO_LOCK:
+                    to_lock.append(player_id)
 
-        # Lock pieces that couldn't move down
+        # Lock pieces whose grace ran out
         for player_id in to_lock:
             self._lock_piece(player_id)
+
+        # Idle cleanup: players who haven't acted in a long time lose their
+        # piece so it stops cluttering the shared board. Any later input
+        # respawns them (see process_action).
+        for player_id in list(self.active_pieces):
+            idle = self.idle_ticks.get(player_id, 0) + 1
+            self.idle_ticks[player_id] = idle
+            if idle >= IDLE_TICKS_BEFORE_REMOVE:
+                self.active_pieces.pop(player_id, None)
+                self._grounded_ticks.pop(player_id, None)
 
     def _ghost_position(self, piece: PieceState) -> PieceState:
         """Calculate where a piece would land if hard-dropped (ghost piece)."""
@@ -370,6 +407,10 @@ class GameEngine:
 
         if delta:
             result["grid_delta"] = delta
+
+        if self._pending_cleared_rows:
+            result["cleared_rows"] = self._pending_cleared_rows
+            self._pending_cleared_rows = []
 
         if self._round_just_reset:
             result["round_reset"] = True

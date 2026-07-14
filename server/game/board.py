@@ -48,14 +48,18 @@ class Board:
             if self.in_bounds(cell):
                 self.grid[cell.row][cell.col] = color
 
-    def clear_lines(self) -> int:
-        """Remove fully filled rows and shift everything above down. Returns lines cleared."""
-        cleared = 0
+    def clear_lines(self) -> list[int]:
+        """Remove fully filled rows and shift everything above down.
+
+        Returns the row indices that were cleared (positions before the shift),
+        so clients can animate a flash where each line was completed.
+        """
+        cleared_rows: list[int] = []
         # Walk from bottom to top
         write_row = self.height - 1
         for read_row in range(self.height - 1, -1, -1):
             if all(cell != CellColor.EMPTY for cell in self.grid[read_row]):
-                cleared += 1
+                cleared_rows.append(read_row)
             else:
                 if write_row != read_row:
                     self.grid[write_row] = self.grid[read_row]
@@ -65,7 +69,7 @@ class Board:
         for row in range(write_row + 1):
             self.grid[row] = [CellColor.EMPTY] * self.width
 
-        return cleared
+        return cleared_rows
 
     def is_topped_out(self) -> bool:
         """Check if any cell in the top 4 rows has a locked piece (game over condition)."""
