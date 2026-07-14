@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from .config import TICK_RATE
+from .config import MAX_MESSAGES_PER_SEC, TICK_RATE
 from .game.engine import GameEngine
 from .game.types import Action
 from .network.ws import ConnectionManager
@@ -59,9 +61,21 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     delta = engine.get_delta()
     await manager.broadcast({"type": "delta", **delta})
 
+    # Sliding-window rate limit: timestamps of this connection's recent messages
+    recent: deque[float] = deque()
+
     try:
         while True:
             data = await ws.receive_json()
+
+            # Drop messages beyond the per-second budget (protects the shared
+            # engine and broadcast fan-out from spammy/malicious clients)
+            now = time.monotonic()
+            while recent and now - recent[0] > 1.0:
+                recent.popleft()
+            if len(recent) >= MAX_MESSAGES_PER_SEC:
+                continue
+            recent.append(now)
 
             # Players can (re)name themselves at any time
             name = data.get("name")
@@ -80,11 +94,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             except ValueError:
                 continue
 
-            engine.process_action(player_id, action)
+            changed = engine.process_action(player_id, action)
 
-            # Broadcast delta after action
-            delta = engine.get_delta()
-            await manager.broadcast({"type": "delta", **delta})
+            # Only fan out when the action actually changed something —
+            # a piece pinned against a wall shouldn't trigger broadcasts
+            if changed:
+                delta = engine.get_delta()
+                await manager.broadcast({"type": "delta", **delta})
 
     except WebSocketDisconnect:
         pass

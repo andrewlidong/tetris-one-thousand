@@ -72,7 +72,7 @@ def test_lock_piece():
 
 def test_clear_lines_none():
     board = Board(width=10, height=20)
-    assert board.clear_lines() == 0
+    assert board.clear_lines() == []
 
 
 def test_clear_lines_one():
@@ -81,7 +81,7 @@ def test_clear_lines_one():
     for col in range(10):
         board.grid[19][col] = CellColor.I
     cleared = board.clear_lines()
-    assert cleared == 1
+    assert cleared == [19]
     # Bottom row should now be empty (shifted down)
     assert all(cell == CellColor.EMPTY for cell in board.grid[19])
 
@@ -94,7 +94,7 @@ def test_clear_lines_preserves_above():
     for col in range(10):
         board.grid[19][col] = CellColor.I
     cleared = board.clear_lines()
-    assert cleared == 1
+    assert cleared == [19]
     # Row 18's content should have shifted down to row 19
     assert board.grid[19][3] == CellColor.T
 

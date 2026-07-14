@@ -242,6 +242,86 @@ def test_set_name_trims_and_caps():
     assert len(engine.names["p1"]) == 16
 
 
+def test_lock_delay_gives_grace_tick():
+    """A grounded piece survives one tick and locks on the second."""
+    engine = GameEngine(width=20, height=6)
+    engine.add_player("p1")
+    # Place an O piece resting on the floor (occupies rows 4 and 5)
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.O, position=Position(4, 0), rotation=0
+    )
+
+    engine.tick()  # grounded tick 1: grace, not locked
+    assert all(cell == 0 for row in engine.board.grid for cell in row)
+    assert engine.active_pieces["p1"].position.row == 4
+
+    engine.tick()  # grounded tick 2: locks
+    assert engine.board.grid[5][0] != 0
+
+
+def test_lock_delay_resets_when_piece_falls_again():
+    """Sliding off a ledge onto open air restarts the lock-delay grace."""
+    engine = GameEngine(width=20, height=6)
+    engine.add_player("p1")
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.O, position=Position(4, 0), rotation=0
+    )
+    engine.tick()  # grounded once
+    assert engine._grounded_ticks.get("p1") == 1
+    # Simulate the piece being able to fall again (e.g. support vanished)
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.O, position=Position(0, 0), rotation=0
+    )
+    engine.tick()  # falls -> grace counter cleared
+    assert "p1" not in engine._grounded_ticks
+
+
+def test_idle_player_piece_removed_and_respawned_on_input():
+    from server.config import IDLE_TICKS_BEFORE_REMOVE
+
+    engine = GameEngine(width=20)
+    engine.add_player("p1")
+
+    for _ in range(IDLE_TICKS_BEFORE_REMOVE):
+        engine.tick()
+
+    assert "p1" not in engine.active_pieces  # removed for idleness
+    assert "p1" in engine.bags  # but not kicked from the game
+
+    # Any input brings them back with a fresh piece
+    assert engine.process_action("p1", Action.SOFT_DROP) is True
+    assert "p1" in engine.active_pieces
+    assert engine.idle_ticks["p1"] == 0
+
+
+def test_actions_reset_idle_counter():
+    engine = GameEngine(width=20)
+    engine.add_player("p1")
+    for _ in range(50):
+        engine.tick()
+    assert engine.idle_ticks["p1"] == 50
+    engine.process_action("p1", Action.SOFT_DROP)
+    assert engine.idle_ticks["p1"] == 0
+
+
+def test_cleared_rows_reported_in_delta():
+    engine = GameEngine(width=20, height=10)
+    engine.add_player("p1")
+    engine.get_delta()  # drain join-time dirt
+    for col in range(4, 20):
+        engine.board.grid[9][col] = 1  # type: ignore[assignment]
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.I, position=Position(0, 0), rotation=0
+    )
+
+    engine.process_action("p1", Action.HARD_DROP)
+
+    delta = engine.get_delta()
+    assert delta["cleared_rows"] == [9]
+    # Consumed: not repeated in the next delta
+    assert "cleared_rows" not in engine.get_delta()
+
+
 def test_leaderboard_sorted_and_capped():
     engine = GameEngine(width=100)
     for i in range(15):

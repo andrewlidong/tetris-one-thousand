@@ -363,6 +363,30 @@ let boardWidth = 0;
 let boardHeight = 0;
 let activePieces = {};
 let statusTimer = null;
+let flashes = [];        // line-clear flashes: {row, until}
+let flashAnimating = false;
+let afk = false;         // server removed our piece for idleness
+
+const FLASH_MS = 350;
+
+function startFlashes(rows) {
+  const until = performance.now() + FLASH_MS;
+  for (const r of rows) flashes.push({ row: r, until });
+  if (!flashAnimating) {
+    flashAnimating = true;
+    requestAnimationFrame(flashFrame);
+  }
+}
+
+function flashFrame() {
+  flashes = flashes.filter(f => f.until > performance.now());
+  render();
+  if (flashes.length) {
+    requestAnimationFrame(flashFrame);
+  } else {
+    flashAnimating = false;
+  }
+}
 
 function showStatus(text, ms) {
   statusEl.textContent = text;
@@ -401,6 +425,8 @@ function connect() {
       if (msg.round_reset) {
         showStatus(`BOARD FULL — ROUND ${msg.round}`, 2500);
       }
+      if (msg.cleared_rows) startFlashes(msg.cleared_rows);
+      updateAfk();
       render();
       scrollToMyPiece();
     }
@@ -517,10 +543,31 @@ function render() {
     }
   }
 
+  // Line-clear flashes: white bands fading out where lines completed
+  const now = performance.now();
+  for (const f of flashes) {
+    const alpha = Math.max(0, (f.until - now) / FLASH_MS) * 0.7;
+    ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
+    ctx.fillRect(0, f.row * CELL, cols * CELL, CELL);
+  }
+
   // Sidebar previews
   const me = activePieces[myPlayerId];
   renderPreview(nextCtx, nextCanvas, me && me.next_piece);
   renderPreview(holdCtx, holdCanvas, me && me.held_piece);
+}
+
+// The server removes pieces of players idle for ~2 minutes; any keypress or
+// button tap respawns us. Tell the player what happened.
+function updateAfk() {
+  const mine = myPlayerId && activePieces[myPlayerId];
+  if (!mine && !afk && myPlayerId) {
+    afk = true;
+    showStatus('AFK — PRESS ANY KEY TO REJOIN');
+  } else if (mine && afk) {
+    afk = false;
+    statusEl.style.display = 'none';
+  }
 }
 
 // Lighten (amt > 0) or darken (amt < 0) a #rrggbb color
