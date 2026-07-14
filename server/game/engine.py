@@ -14,11 +14,15 @@ import random
 from collections import deque
 
 from ..config import (
+    BIG_CLEAR_MIN,
     BOARD_HEIGHT,
     BOARD_MAX_WIDTH,
     BOARD_MIN_WIDTH,
     COLUMNS_PER_PLAYER,
     DORMANT_LIMIT,
+    FRENZY_DURATION_TICKS,
+    FRENZY_INTERVAL_TICKS,
+    FRENZY_MULTIPLIER,
     GROUNDED_TICKS_TO_LOCK,
     IDLE_TICKS_BEFORE_REMOVE,
     LEADERBOARD_SIZE,
@@ -68,6 +72,11 @@ class GameEngine:
         self.round: int = 1
         # Identities of disconnected players, restored if they reconnect
         self.dormant: dict[str, dict] = {}
+        # Frenzy (periodic double-points event), driven by tick counters
+        self.frenzy_ticks_left: int = 0
+        self.ticks_until_frenzy: int = FRENZY_INTERVAL_TICKS
+        # One-shot announcements (big clears, frenzy start/end) for the next delta
+        self._pending_events: list[dict] = []
         # Set when the board topped out and was wiped; popped into the next delta
         self._round_just_reset: bool = False
         # Lock delay: consecutive ticks each piece has rested on the ground
@@ -93,6 +102,23 @@ class GameEngine:
     def tick_interval(self) -> float:
         """Seconds between gravity ticks at the current speed level."""
         return max(MIN_TICK_RATE, TICK_RATE - SPEEDUP_PER_LEVEL * self.speed_level)
+
+    @property
+    def frenzy_active(self) -> bool:
+        return self.frenzy_ticks_left > 0
+
+    def _tick_frenzy(self) -> None:
+        """Advance the frenzy timers: a periodic window of double points."""
+        if self.frenzy_ticks_left > 0:
+            self.frenzy_ticks_left -= 1
+            if self.frenzy_ticks_left == 0:
+                self._pending_events.append({"type": "frenzy_end"})
+        else:
+            self.ticks_until_frenzy -= 1
+            if self.ticks_until_frenzy <= 0:
+                self.frenzy_ticks_left = FRENZY_DURATION_TICKS
+                self.ticks_until_frenzy = FRENZY_INTERVAL_TICKS
+                self._pending_events.append({"type": "frenzy_start"})
 
     def desired_width(self, num_players: int) -> int:
         """Calculate the board width needed for the given number of players."""
@@ -322,9 +348,18 @@ class GameEngine:
             self.lines_this_round += cleared
             points = {1: 100, 2: 300, 3: 500, 4: 800}
             earned = points.get(cleared, cleared * 200)
+            if self.frenzy_active:
+                earned *= FRENZY_MULTIPLIER
             self.score += earned
             # Credit the player whose piece completed the line(s)
             self.scores[player_id] = self.scores.get(player_id, 0) + earned
+            # Announce triples and Tetrises to the whole board
+            if cleared >= BIG_CLEAR_MIN:
+                self._pending_events.append({
+                    "type": "big_clear",
+                    "name": self.names.get(player_id, ""),
+                    "lines": cleared,
+                })
             # Line clear affects everything — mark entire board dirty
             for r in range(self.board.height):
                 for c in range(self.board.width):
@@ -345,6 +380,8 @@ class GameEngine:
         GROUNDED_TICKS_TO_LOCK ticks of grace (lock delay) so the player can
         still slide or rotate it. Moving off a ledge resets the grace.
         """
+        self._tick_frenzy()
+
         to_lock: list[str] = []
 
         for player_id, piece in self.active_pieces.items():
@@ -421,6 +458,7 @@ class GameEngine:
             "player_count": self.player_count,
             "round": self.round,
             "speed_level": self.speed_level,
+            "frenzy": self.frenzy_active,
             "leaderboard": self._build_leaderboard(),
         }
 
@@ -444,8 +482,13 @@ class GameEngine:
             "player_count": self.player_count,
             "round": self.round,
             "speed_level": self.speed_level,
+            "frenzy": self.frenzy_active,
             "leaderboard": self._build_leaderboard(),
         }
+
+        if self._pending_events:
+            result["events"] = self._pending_events
+            self._pending_events = []
 
         if delta:
             result["grid_delta"] = delta

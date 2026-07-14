@@ -16,3 +16,7 @@ IDLE_TICKS_BEFORE_REMOVE = 240  # 240 ticks x 0.5s = 2 min without input -> piec
 MAX_MESSAGES_PER_SEC = 60
 BROADCAST_CHUNK = 50  # concurrent sends per asyncio.gather batch
 DORMANT_LIMIT = 500  # disconnected identities remembered for reconnect
+BIG_CLEAR_MIN = 3  # clearing this many lines at once is announced to everyone
+FRENZY_INTERVAL_TICKS = 360  # ticks between frenzies (~3 min at base speed)
+FRENZY_DURATION_TICKS = 60  # frenzy length in ticks (~30s at base speed)
+FRENZY_MULTIPLIER = 2  # score multiplier while a frenzy is active

@@ -149,6 +149,13 @@ def test_same_token_second_tab_gets_new_identity():
             assert welcome2["player_id"] != welcome1["player_id"]
 
 
+def test_highscores_endpoint():
+    client = TestClient(app)
+    resp = client.get("/highscores")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
 def test_full_state_has_ghost_and_next():
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:

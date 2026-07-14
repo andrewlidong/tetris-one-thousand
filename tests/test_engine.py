@@ -371,6 +371,66 @@ def test_dormant_capped():
     assert f"p{DORMANT_LIMIT + 19}" in engine.dormant
 
 
+def test_frenzy_starts_and_ends_on_schedule():
+    from server.config import FRENZY_DURATION_TICKS, FRENZY_INTERVAL_TICKS
+
+    engine = GameEngine(width=20)
+    for _ in range(FRENZY_INTERVAL_TICKS - 1):
+        engine.tick()
+    assert not engine.frenzy_active
+
+    engine.tick()  # the interval elapses
+    assert engine.frenzy_active
+    delta = engine.get_delta()
+    assert {"type": "frenzy_start"} in delta.get("events", [])
+    assert delta["frenzy"] is True
+
+    for _ in range(FRENZY_DURATION_TICKS):
+        engine.tick()
+    assert not engine.frenzy_active
+    delta = engine.get_delta()
+    assert {"type": "frenzy_end"} in delta.get("events", [])
+    assert delta["frenzy"] is False
+
+
+def test_frenzy_doubles_points():
+    from server.config import FRENZY_MULTIPLIER
+
+    engine = GameEngine(width=20, height=10)
+    engine.add_player("p1")
+    engine.frenzy_ticks_left = 100  # force a frenzy
+    for col in range(4, 20):
+        engine.board.grid[9][col] = 1  # type: ignore[assignment]
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.I, position=Position(0, 0), rotation=0
+    )
+
+    engine.process_action("p1", Action.HARD_DROP)
+
+    assert engine.scores["p1"] == 100 * FRENZY_MULTIPLIER
+
+
+def test_big_clear_announced():
+    engine = GameEngine(width=20, height=10)
+    engine.add_player("p1", name="Andrew")
+    # Fill 4 rows except columns 0 (vertical I piece will finish them)
+    for row in range(6, 10):
+        for col in range(1, 20):
+            engine.board.grid[row][col] = 1  # type: ignore[assignment]
+    # Vertical I piece over column 0 (rotation 1 occupies col+2, rows 0-3)
+    engine.active_pieces["p1"] = PieceState(
+        piece_type=PieceType.I, position=Position(0, -2), rotation=1
+    )
+
+    engine.process_action("p1", Action.HARD_DROP)
+
+    delta = engine.get_delta()
+    events = delta.get("events", [])
+    assert {"type": "big_clear", "name": "Andrew", "lines": 4} in events
+    # One-shot: consumed by the first delta
+    assert "events" not in engine.get_delta()
+
+
 def test_leaderboard_sorted_and_capped():
     engine = GameEngine(width=100)
     for i in range(15):
