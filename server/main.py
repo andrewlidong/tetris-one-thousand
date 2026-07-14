@@ -13,20 +13,31 @@ from fastapi.responses import FileResponse
 from .config import MAX_MESSAGES_PER_SEC
 from .game.engine import GameEngine
 from .game.types import Action
+from .highscores import HighScores
 from .network.ws import ConnectionManager
 
 engine = GameEngine()
 manager = ConnectionManager()
+highscores = HighScores()
+
+# Ticks between periodic high-score sweeps of all connected players
+_HIGHSCORE_SWEEP_TICKS = 20
 
 
 async def game_loop() -> None:
     """Tick the engine and broadcast deltas. The interval shrinks as the
     team clears lines (gravity ramp), resetting each round."""
+    ticks = 0
     while True:
         await asyncio.sleep(engine.tick_interval)
         engine.tick()
         delta = engine.get_delta()
         await manager.broadcast({"type": "delta", **delta})
+
+        ticks += 1
+        if ticks % _HIGHSCORE_SWEEP_TICKS == 0:
+            for pid, score in engine.scores.items():
+                highscores.submit(engine.names.get(pid, ""), score)
 
 
 @asynccontextmanager
@@ -44,6 +55,11 @@ async def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/highscores")
+async def get_highscores() -> list[dict]:
+    return highscores.top()
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     # Optional reconnect token: a returning browser keeps its identity
@@ -55,10 +71,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     engine.add_player(player_id)
 
     # Send welcome + full state to the new player
-    await manager.send_to(ws, {
-        "type": "welcome",
-        "player_id": player_id,
-    })
+    await manager.send_to(
+        ws,
+        {
+            "type": "welcome",
+            "player_id": player_id,
+        },
+    )
     await manager.send_to(ws, {"type": "state", **engine.get_state()})
 
     # Send delta to everyone else so they see the new piece
@@ -110,6 +129,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         pass
     finally:
         manager.disconnect(ws)
+        # Capture their final score before the identity goes dormant
+        highscores.submit(engine.names.get(player_id, ""), engine.scores.get(player_id, 0))
         engine.remove_player(player_id)
         delta = engine.get_delta()
         await manager.broadcast({"type": "delta", **delta})

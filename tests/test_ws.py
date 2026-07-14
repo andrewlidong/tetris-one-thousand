@@ -8,6 +8,7 @@ from server.main import app, engine, manager
 def reset_state():
     """Reset game state between tests."""
     from server.game.engine import GameEngine
+
     fresh = GameEngine()
     engine.__dict__.update(fresh.__dict__)
     manager.connections.clear()
@@ -149,6 +150,13 @@ def test_same_token_second_tab_gets_new_identity():
             assert welcome2["player_id"] != welcome1["player_id"]
 
 
+def test_highscores_endpoint():
+    client = TestClient(app)
+    resp = client.get("/highscores")
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
 def test_full_state_has_ghost_and_next():
     client = TestClient(app)
     with client.websocket_connect("/ws") as ws:
@@ -156,7 +164,7 @@ def test_full_state_has_ghost_and_next():
         state = ws.receive_json()  # full state
         assert state["type"] == "state"
 
-        for pid, p in state["active_pieces"].items():
+        for p in state["active_pieces"].values():
             assert "ghost_cells" in p
             assert "next_piece" in p
             assert len(p["ghost_cells"]) == 4

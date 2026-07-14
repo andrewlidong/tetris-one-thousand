@@ -29,7 +29,9 @@ class Stats:
     connect_time: float = 0.0
 
 
-async def player(url: str, player_num: int, duration: float, stats: Stats, action_interval: float = 0.2):
+async def player(
+    url: str, player_num: int, duration: float, stats: Stats, action_interval: float = 0.2
+):
     """Simulate a single player: connect, send random actions, measure latency."""
     try:
         t0 = time.monotonic()
@@ -47,7 +49,7 @@ async def player(url: str, player_num: int, duration: float, stats: Stats, actio
 
         async def reader():
             try:
-                async for msg in ws:
+                async for _msg in ws:
                     stats.messages_received += 1
             except Exception:
                 pass

@@ -24,6 +24,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
+    "websockets>=12.0",
 ]
 
 [tool.ruff]
@@ -32,3 +33,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# I and O are the canonical tetromino names, not ambiguous variables
+"server/game/types.py" = ["E741"]

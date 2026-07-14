@@ -4,8 +4,8 @@ The board can grow wider as more players join. Height is fixed.
 Row 0 is the top of the board.
 """
 
-from .types import CellColor, PieceState, Position, PIECE_COLORS
 from .piece import get_cells
+from .types import PIECE_COLORS, CellColor, PieceState, Position
 
 
 class Board:
@@ -13,9 +13,7 @@ class Board:
         self.width = width
         self.height = height
         # grid[row][col] — row 0 is top
-        self.grid: list[list[CellColor]] = [
-            [CellColor.EMPTY] * width for _ in range(height)
-        ]
+        self.grid: list[list[CellColor]] = [[CellColor.EMPTY] * width for _ in range(height)]
 
     def expand_width(self, new_width: int) -> None:
         """Expand the board by adding empty columns on the right."""

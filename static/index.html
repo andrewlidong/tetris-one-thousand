@@ -71,6 +71,17 @@ body {
   cursor: pointer;
 }
 #mute-btn:hover { border-color: var(--accent); }
+#hud-frenzy {
+  display: none;
+  color: var(--gold) !important;
+  font-weight: bold;
+  letter-spacing: 1px;
+  animation: frenzy-pulse 0.6s ease-in-out infinite;
+}
+@keyframes frenzy-pulse {
+  0%, 100% { opacity: 1; text-shadow: 0 0 10px rgba(255, 201, 60, 0.7); }
+  50%      { opacity: 0.55; text-shadow: 0 0 22px rgba(255, 201, 60, 1); }
+}
 
 /* ── Board ── */
 #game-area {
@@ -289,6 +300,27 @@ canvas { background: #05050c; display: block; }
 }
 #name-btn:hover { transform: scale(1.05); box-shadow: 0 0 34px rgba(0, 229, 229, 0.4); }
 #name-btn:active { transform: scale(0.97); }
+#highscores {
+  margin-top: 1.2rem;
+  font-size: 0.78rem;
+  line-height: 1.9;
+  min-width: 220px;
+  text-align: center;
+}
+#highscores h2 {
+  font-size: 0.65rem;
+  letter-spacing: 3px;
+  color: var(--dim);
+  margin-bottom: 0.3rem;
+}
+#highscores .hs-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  color: var(--text);
+}
+#highscores .hs-row:first-of-type { color: var(--gold); }
+#highscores .hs-score { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -297,6 +329,7 @@ canvas { background: #05050c; display: block; }
   <h1>TETRIS 1000</h1>
   <input id="name-input" type="text" maxlength="16" placeholder="Your name" autocomplete="off" spellcheck="false">
   <button id="name-btn">PLAY</button>
+  <div id="highscores"></div>
 </div>
 
 <div id="header">
@@ -307,6 +340,7 @@ canvas { background: #05050c; display: block; }
   <span>Team: <strong id="hud-score">0</strong></span>
   <span>Lines: <strong id="hud-lines">0</strong></span>
   <span>Board: <strong id="hud-size">0x0</strong></span>
+  <span id="hud-frenzy">2&times; FRENZY</span>
   <button id="mute-btn" aria-label="Toggle sound" title="Toggle sound (M)">&#x1F50A;</button>
 </div>
 
@@ -485,7 +519,29 @@ const SFX = {
     }
   },
   round:     () => beep(600, 0.5, 'sawtooth', 0.045, 120),
+  fanfare:   () => {
+    // Big-clear celebration: fast major arpeggio up
+    [587, 740, 880, 1175].forEach((f, i) =>
+      setTimeout(() => beep(f, 0.12, 'triangle', 0.06), i * 90));
+  },
+  frenzy:    () => {
+    [392, 494, 587, 494, 587, 784].forEach((f, i) =>
+      setTimeout(() => beep(f, 0.08, 'square', 0.05), i * 80));
+  },
 };
+
+function handleEvent(ev) {
+  if (ev.type === 'big_clear') {
+    const who = (ev.name || 'someone').toUpperCase();
+    showStatus(ev.lines >= 4 ? `${who} SCORED A TETRIS!` : `TRIPLE BY ${who}!`, 2200);
+    SFX.fanfare();
+  } else if (ev.type === 'frenzy_start') {
+    showStatus('FRENZY — DOUBLE POINTS!', 2500);
+    SFX.frenzy();
+  } else if (ev.type === 'frenzy_end') {
+    beep(300, 0.15, 'sine', 0.03, 180);
+  }
+}
 
 function setMuted(m) {
   muted = m;
@@ -543,6 +599,12 @@ function connect() {
       if (msg.cleared_rows) {
         startFlashes(msg.cleared_rows);
         SFX.clear(msg.cleared_rows.length);
+      }
+      if (msg.events) {
+        for (const ev of msg.events) handleEvent(ev);
+      }
+      if (msg.frenzy !== undefined) {
+        document.getElementById('hud-frenzy').style.display = msg.frenzy ? 'inline' : 'none';
       }
       updateAfk();
       render();
@@ -1013,6 +1075,29 @@ function startGame() {
 }
 
 setMuted(muted); // reflect the saved sound preference in the button icon
+
+// All-time best on the title screen
+fetch('/highscores')
+  .then(r => r.json())
+  .then(list => {
+    if (!list.length) return;
+    const box = document.getElementById('highscores');
+    const h = document.createElement('h2');
+    h.textContent = 'ALL-TIME BEST';
+    box.appendChild(h);
+    for (const e of list.slice(0, 5)) {
+      const row = document.createElement('div');
+      row.className = 'hs-row';
+      const name = document.createElement('span');
+      name.textContent = e.name;
+      const score = document.createElement('span');
+      score.className = 'hs-score';
+      score.textContent = e.score;
+      row.append(name, score);
+      box.appendChild(row);
+    }
+  })
+  .catch(() => {});
 
 nameBtn.addEventListener('click', startGame);
 nameInput.addEventListener('keydown', (e) => {
