@@ -71,10 +71,13 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     engine.add_player(player_id)
 
     # Send welcome + full state to the new player
-    await manager.send_to(ws, {
-        "type": "welcome",
-        "player_id": player_id,
-    })
+    await manager.send_to(
+        ws,
+        {
+            "type": "welcome",
+            "player_id": player_id,
+        },
+    )
     await manager.send_to(ws, {"type": "state", **engine.get_state()})
 
     # Send delta to everyone else so they see the new piece

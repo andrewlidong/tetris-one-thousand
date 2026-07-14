@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 
@@ -69,7 +70,5 @@ class ConnectionManager:
             self.connections.pop(ws, None)
 
     async def send_to(self, ws: WebSocket, data: dict) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await ws.send_text(json.dumps(data))
-        except Exception:
-            pass

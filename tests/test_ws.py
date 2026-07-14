@@ -8,6 +8,7 @@ from server.main import app, engine, manager
 def reset_state():
     """Reset game state between tests."""
     from server.game.engine import GameEngine
+
     fresh = GameEngine()
     engine.__dict__.update(fresh.__dict__)
     manager.connections.clear()
@@ -163,7 +164,7 @@ def test_full_state_has_ghost_and_next():
         state = ws.receive_json()  # full state
         assert state["type"] == "state"
 
-        for pid, p in state["active_pieces"].items():
+        for p in state["active_pieces"].values():
             assert "ghost_cells" in p
             assert "next_piece" in p
             assert len(p["ghost_cells"]) == 4

@@ -1,4 +1,4 @@
-from server.game.piece import get_cells, SHAPES
+from server.game.piece import SHAPES, get_cells
 from server.game.types import PieceState, PieceType, Position
 
 

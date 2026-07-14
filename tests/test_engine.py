@@ -75,7 +75,6 @@ def test_soft_drop():
 def test_hard_drop_locks_piece():
     engine = GameEngine(width=20)
     engine.add_player("p1")
-    old_piece_type = engine.active_pieces["p1"].piece_type
     engine.process_action("p1", Action.HARD_DROP)
     # After hard drop, the player should have a new piece (different position at top)
     new_piece = engine.active_pieces.get("p1")

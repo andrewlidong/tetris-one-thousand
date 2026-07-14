@@ -180,9 +180,7 @@ class GameEngine:
         if cleaned:
             self.names[player_id] = cleaned
 
-    def spawn_piece(
-        self, player_id: str, piece_type: PieceType | None = None
-    ) -> PieceState | None:
+    def spawn_piece(self, player_id: str, piece_type: PieceType | None = None) -> PieceState | None:
         """Spawn a piece for the given player.
 
         Uses the player's next-piece queue unless an explicit type is given
@@ -355,11 +353,13 @@ class GameEngine:
             self.scores[player_id] = self.scores.get(player_id, 0) + earned
             # Announce triples and Tetrises to the whole board
             if cleared >= BIG_CLEAR_MIN:
-                self._pending_events.append({
-                    "type": "big_clear",
-                    "name": self.names.get(player_id, ""),
-                    "lines": cleared,
-                })
+                self._pending_events.append(
+                    {
+                        "type": "big_clear",
+                        "name": self.names.get(player_id, ""),
+                        "lines": cleared,
+                    }
+                )
             # Line clear affects everything — mark entire board dirty
             for r in range(self.board.height):
                 for c in range(self.board.width):
