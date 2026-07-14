@@ -322,6 +322,55 @@ def test_cleared_rows_reported_in_delta():
     assert "cleared_rows" not in engine.get_delta()
 
 
+def test_gravity_ramps_with_lines_and_resets_each_round():
+    from server.config import LINES_PER_SPEEDUP, MIN_TICK_RATE, SPEEDUP_PER_LEVEL, TICK_RATE
+
+    engine = GameEngine(width=20)
+    assert engine.speed_level == 0
+    assert engine.tick_interval == TICK_RATE
+
+    engine.lines_this_round = LINES_PER_SPEEDUP * 3
+    assert engine.speed_level == 3
+    assert engine.tick_interval == TICK_RATE - 3 * SPEEDUP_PER_LEVEL
+
+    # Clamped at the floor no matter how many lines
+    engine.lines_this_round = 10_000
+    assert engine.tick_interval == MIN_TICK_RATE
+
+    # New round -> back to base speed
+    engine._reset_round()
+    assert engine.speed_level == 0
+    assert engine.tick_interval == TICK_RATE
+
+
+def test_dormant_identity_restored_on_rejoin():
+    engine = GameEngine(width=20)
+    engine.add_player("p1", name="Andrew")
+    engine.scores["p1"] = 700
+
+    engine.remove_player("p1")
+    assert "p1" not in engine.scores  # gone from the leaderboard
+    assert engine.dormant["p1"] == {"name": "Andrew", "score": 700}
+
+    engine.add_player("p1")  # same identity reconnects
+    assert engine.names["p1"] == "Andrew"
+    assert engine.scores["p1"] == 700
+    assert "p1" not in engine.dormant  # consumed
+
+
+def test_dormant_capped():
+    from server.config import DORMANT_LIMIT
+
+    engine = GameEngine(width=100)
+    for i in range(DORMANT_LIMIT + 20):
+        pid = f"p{i}"
+        engine.add_player(pid)
+        engine.remove_player(pid)
+    assert len(engine.dormant) == DORMANT_LIMIT
+    assert "p0" not in engine.dormant  # oldest evicted
+    assert f"p{DORMANT_LIMIT + 19}" in engine.dormant
+
+
 def test_leaderboard_sorted_and_capped():
     engine = GameEngine(width=100)
     for i in range(15):
