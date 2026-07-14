@@ -2,7 +2,10 @@ BOARD_HEIGHT = 40
 BOARD_MIN_WIDTH = 20
 BOARD_MAX_WIDTH = 500
 COLUMNS_PER_PLAYER = 2
-TICK_RATE = 0.5  # seconds between gravity ticks
+TICK_RATE = 0.5  # base seconds between gravity ticks (speed level 0)
+MIN_TICK_RATE = 0.15  # gravity never gets faster than this
+LINES_PER_SPEEDUP = 10  # team lines cleared (per round) per speed level
+SPEEDUP_PER_LEVEL = 0.05  # seconds shaved off the tick interval per level
 SPAWN_TOP_ROW = 0  # row where new pieces appear
 LEADERBOARD_SIZE = 10  # top-N players broadcast to everyone
 MAX_NAME_LENGTH = 16  # display names are trimmed to this
@@ -11,3 +14,5 @@ IDLE_TICKS_BEFORE_REMOVE = 240  # 240 ticks x 0.5s = 2 min without input -> piec
 # Per-connection rate limit; excess messages dropped. Must allow legit play:
 # DAS auto-repeat is 20 msg/s per held key and 3 keys can repeat at once.
 MAX_MESSAGES_PER_SEC = 60
+BROADCAST_CHUNK = 50  # concurrent sends per asyncio.gather batch
+DORMANT_LIMIT = 500  # disconnected identities remembered for reconnect

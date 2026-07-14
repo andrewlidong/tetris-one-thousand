@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from .config import MAX_MESSAGES_PER_SEC, TICK_RATE
+from .config import MAX_MESSAGES_PER_SEC
 from .game.engine import GameEngine
 from .game.types import Action
 from .network.ws import ConnectionManager
@@ -20,9 +20,10 @@ manager = ConnectionManager()
 
 
 async def game_loop() -> None:
-    """Tick the engine at a fixed rate and broadcast deltas to all players."""
+    """Tick the engine and broadcast deltas. The interval shrinks as the
+    team clears lines (gravity ramp), resetting each round."""
     while True:
-        await asyncio.sleep(TICK_RATE)
+        await asyncio.sleep(engine.tick_interval)
         engine.tick()
         delta = engine.get_delta()
         await manager.broadcast({"type": "delta", **delta})
@@ -45,7 +46,10 @@ async def index() -> FileResponse:
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
-    player_id = await manager.connect(ws)
+    # Optional reconnect token: a returning browser keeps its identity
+    # (name + score) across disconnects and refreshes
+    token = ws.query_params.get("token") or None
+    player_id = await manager.connect(ws, token)
 
     # Add the player to the game engine
     engine.add_player(player_id)

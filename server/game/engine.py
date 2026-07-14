@@ -18,11 +18,16 @@ from ..config import (
     BOARD_MAX_WIDTH,
     BOARD_MIN_WIDTH,
     COLUMNS_PER_PLAYER,
+    DORMANT_LIMIT,
     GROUNDED_TICKS_TO_LOCK,
     IDLE_TICKS_BEFORE_REMOVE,
     LEADERBOARD_SIZE,
+    LINES_PER_SPEEDUP,
     MAX_NAME_LENGTH,
+    MIN_TICK_RATE,
     SPAWN_TOP_ROW,
+    SPEEDUP_PER_LEVEL,
+    TICK_RATE,
 )
 from .board import Board
 from .piece import get_cells, get_wall_kicks
@@ -59,7 +64,10 @@ class GameEngine:
         self.scores: dict[str, int] = {}  # player_id -> personal score
         self.score: int = 0  # team score (sum of all points ever earned)
         self.lines_cleared: int = 0
+        self.lines_this_round: int = 0  # drives the gravity ramp; resets each round
         self.round: int = 1
+        # Identities of disconnected players, restored if they reconnect
+        self.dormant: dict[str, dict] = {}
         # Set when the board topped out and was wiped; popped into the next delta
         self._round_just_reset: bool = False
         # Lock delay: consecutive ticks each piece has rested on the ground
@@ -75,6 +83,16 @@ class GameEngine:
     @property
     def player_count(self) -> int:
         return len(self.active_pieces)
+
+    @property
+    def speed_level(self) -> int:
+        """Gravity speed level: rises as the team clears lines, resets each round."""
+        return self.lines_this_round // LINES_PER_SPEEDUP
+
+    @property
+    def tick_interval(self) -> float:
+        """Seconds between gravity ticks at the current speed level."""
+        return max(MIN_TICK_RATE, TICK_RATE - SPEEDUP_PER_LEVEL * self.speed_level)
 
     def desired_width(self, num_players: int) -> int:
         """Calculate the board width needed for the given number of players."""
@@ -93,13 +111,33 @@ class GameEngine:
         self.next_pieces[player_id] = bag.next()
         self.held_pieces[player_id] = None
         self.hold_used[player_id] = False
-        self.scores.setdefault(player_id, 0)
-        self.set_name(player_id, name or f"player-{player_id[:4]}")
+
+        # A returning player (reconnect token) gets their identity back
+        restored = self.dormant.pop(player_id, None)
+        if restored:
+            self.scores[player_id] = restored["score"]
+            self.set_name(player_id, name or restored["name"])
+        else:
+            self.scores.setdefault(player_id, 0)
+            self.set_name(player_id, name or f"player-{player_id[:4]}")
 
         return self.spawn_piece(player_id)
 
     def remove_player(self, player_id: str) -> None:
-        """Remove a player and their active piece from the game."""
+        """Remove a player and their active piece from the game.
+
+        Name and score are parked in `dormant` so a reconnect with the same
+        identity (see ConnectionManager.sessions) can restore them.
+        """
+        if player_id in self.bags:
+            self.dormant[player_id] = {
+                "name": self.names.get(player_id, ""),
+                "score": self.scores.get(player_id, 0),
+            }
+            # Bound memory: forget the oldest identities beyond the cap
+            while len(self.dormant) > DORMANT_LIMIT:
+                self.dormant.pop(next(iter(self.dormant)))
+
         self.active_pieces.pop(player_id, None)
         self.bags.pop(player_id, None)
         self.next_pieces.pop(player_id, None)
@@ -170,6 +208,7 @@ class GameEngine:
                 self.board.grid[r][c] = CellColor.EMPTY
                 self._dirty_cells.add((r, c))
         self.round += 1
+        self.lines_this_round = 0  # gravity goes back to base speed
         self._round_just_reset = True
 
     def process_action(self, player_id: str, action: Action) -> bool:
@@ -280,6 +319,7 @@ class GameEngine:
         if cleared > 0:
             self._pending_cleared_rows.extend(cleared_rows)
             self.lines_cleared += cleared
+            self.lines_this_round += cleared
             points = {1: 100, 2: 300, 3: 500, 4: 800}
             earned = points.get(cleared, cleared * 200)
             self.score += earned
@@ -380,6 +420,7 @@ class GameEngine:
             "board_height": self.board.height,
             "player_count": self.player_count,
             "round": self.round,
+            "speed_level": self.speed_level,
             "leaderboard": self._build_leaderboard(),
         }
 
@@ -402,6 +443,7 @@ class GameEngine:
             "lines_cleared": self.lines_cleared,
             "player_count": self.player_count,
             "round": self.round,
+            "speed_level": self.speed_level,
             "leaderboard": self._build_leaderboard(),
         }
 

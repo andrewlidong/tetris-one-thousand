@@ -279,6 +279,7 @@ canvas { background: #05050c; display: block; }
 <div id="header">
   <span>Players: <strong id="hud-players">0</strong></span>
   <span>Round: <strong id="hud-round">1</strong></span>
+  <span>Speed: <strong id="hud-speed">1</strong></span>
   <span>My Score: <strong id="hud-myscore">0</strong></span>
   <span>Team: <strong id="hud-score">0</strong></span>
   <span>Lines: <strong id="hud-lines">0</strong></span>
@@ -395,9 +396,18 @@ function showStatus(text, ms) {
   if (ms) statusTimer = setTimeout(() => { statusEl.style.display = 'none'; }, ms);
 }
 
+// Stable per-browser token so the server restores our name and score
+// when we reconnect (refresh, dropped connection, revisit)
+let token = localStorage.getItem('tetris-token');
+if (!token) {
+  token = crypto.randomUUID ? crypto.randomUUID()
+                            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  localStorage.setItem('tetris-token', token);
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
 
   ws.onopen = () => {
     statusEl.style.display = 'none';
@@ -682,6 +692,8 @@ function updateHUD(state) {
     document.getElementById('hud-players').textContent = state.player_count;
   if (state.round !== undefined)
     document.getElementById('hud-round').textContent = state.round;
+  if (state.speed_level !== undefined)
+    document.getElementById('hud-speed').textContent = state.speed_level + 1;
   if (state.score !== undefined)
     document.getElementById('hud-score').textContent = state.score;
   if (state.lines_cleared !== undefined)

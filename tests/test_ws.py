@@ -11,6 +11,7 @@ def reset_state():
     fresh = GameEngine()
     engine.__dict__.update(fresh.__dict__)
     manager.connections.clear()
+    manager.sessions.clear()
     yield
 
 
@@ -119,6 +120,33 @@ def test_hold_action():
         msg = ws.receive_json()
         assert msg["type"] == "delta"
         assert msg["active_pieces"][my_id]["held_piece"] is not None
+
+
+def test_reconnect_token_restores_identity():
+    client = TestClient(app)
+    with client.websocket_connect("/ws?token=secret-abc") as ws:
+        welcome, _ = _consume_connect(ws)
+        first_id = welcome["player_id"]
+        ws.send_json({"name": "Andrew"})
+        ws.receive_json()  # name delta
+
+    # Reconnect with the same token: same player id, name preserved
+    with client.websocket_connect("/ws?token=secret-abc") as ws:
+        welcome2 = ws.receive_json()
+        assert welcome2["player_id"] == first_id
+        state = ws.receive_json()
+        names = {e["id"]: e["name"] for e in state["leaderboard"]}
+        assert names[first_id] == "Andrew"
+
+
+def test_same_token_second_tab_gets_new_identity():
+    client = TestClient(app)
+    with client.websocket_connect("/ws?token=tok-x") as ws1:
+        welcome1, _ = _consume_connect(ws1)
+        # Token already live -> second connection becomes a separate player
+        with client.websocket_connect("/ws?token=tok-x") as ws2:
+            welcome2 = ws2.receive_json()
+            assert welcome2["player_id"] != welcome1["player_id"]
 
 
 def test_full_state_has_ghost_and_next():
