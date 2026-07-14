@@ -61,6 +61,16 @@ body {
   font-size: 1rem;
   text-shadow: 0 0 12px var(--accent-soft);
 }
+#mute-btn {
+  background: none;
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 0 0.45rem;
+  cursor: pointer;
+}
+#mute-btn:hover { border-color: var(--accent); }
 
 /* ── Board ── */
 #game-area {
@@ -80,6 +90,19 @@ body {
 #canvas-wrap::-webkit-scrollbar { height: 8px; width: 8px; }
 #canvas-wrap::-webkit-scrollbar-thumb { background: var(--panel-edge); border-radius: 4px; }
 canvas { background: #05050c; display: block; }
+#minimap {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(10, 10, 20, 0.82);
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  cursor: pointer;
+  z-index: 5;
+}
+@media (max-width: 700px) {
+  #minimap { width: 150px; height: 24px; }
+}
 
 /* ── Sidebar ── */
 #sidebar {
@@ -284,12 +307,14 @@ canvas { background: #05050c; display: block; }
   <span>Team: <strong id="hud-score">0</strong></span>
   <span>Lines: <strong id="hud-lines">0</strong></span>
   <span>Board: <strong id="hud-size">0x0</strong></span>
+  <button id="mute-btn" aria-label="Toggle sound" title="Toggle sound (M)">&#x1F50A;</button>
 </div>
 
 <div id="game-area">
   <div id="canvas-wrap">
     <canvas id="board"></canvas>
   </div>
+  <canvas id="minimap" width="280" height="44"></canvas>
   <div id="sidebar">
     <h3>Hold</h3>
     <canvas id="hold-canvas" width="80" height="48"></canvas>
@@ -353,6 +378,8 @@ const holdCtx = holdCanvas.getContext('2d');
 const canvasWrap = document.getElementById('canvas-wrap');
 const statusEl = document.getElementById('status');
 const leaderboardEl = document.getElementById('leaderboard');
+const minimap = document.getElementById('minimap');
+const mctx = minimap.getContext('2d');
 
 let myPlayerId = null;
 let myName = '';
@@ -365,28 +392,105 @@ let boardHeight = 0;
 let activePieces = {};
 let statusTimer = null;
 let flashes = [];        // line-clear flashes: {row, until}
-let flashAnimating = false;
+let particles = [];      // hard-drop sparks: {x, y, vx, vy, until, color}
+let fxActive = false;    // one rAF loop drives all transient effects
 let afk = false;         // server removed our piece for idleness
 
 const FLASH_MS = 350;
+const PARTICLE_MS = 450;
 
 function startFlashes(rows) {
   const until = performance.now() + FLASH_MS;
   for (const r of rows) flashes.push({ row: r, until });
-  if (!flashAnimating) {
-    flashAnimating = true;
-    requestAnimationFrame(flashFrame);
+  ensureFx();
+}
+
+function spawnDropParticles(cells, color) {
+  const until = performance.now() + PARTICLE_MS;
+  for (const cell of cells) {
+    for (let i = 0; i < 3; i++) {
+      particles.push({
+        x: (cell.col + 0.5) * CELL + (Math.random() - 0.5) * CELL,
+        y: (cell.row + 0.9) * CELL,
+        vx: (Math.random() - 0.5) * 2.2,
+        vy: -(Math.random() * 2.0 + 0.5),
+        until,
+        color,
+      });
+    }
+  }
+  ensureFx();
+}
+
+function ensureFx() {
+  if (!fxActive) {
+    fxActive = true;
+    requestAnimationFrame(fxFrame);
   }
 }
 
-function flashFrame() {
-  flashes = flashes.filter(f => f.until > performance.now());
-  render();
-  if (flashes.length) {
-    requestAnimationFrame(flashFrame);
-  } else {
-    flashAnimating = false;
+function fxFrame() {
+  const now = performance.now();
+  flashes = flashes.filter(f => f.until > now);
+  for (const p of particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.18; // gravity
   }
+  particles = particles.filter(p => p.until > now);
+  render();
+  if (flashes.length || particles.length) {
+    requestAnimationFrame(fxFrame);
+  } else {
+    fxActive = false;
+  }
+}
+
+// ── Sound effects: tiny WebAudio synth blips, no audio files ─────────────
+let audioCtx = null;
+let muted = localStorage.getItem('tetris-muted') === '1';
+
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch { return; }
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function beep(freq, dur = 0.05, type = 'square', vol = 0.04, slideTo = null) {
+  if (muted || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + dur);
+}
+
+const SFX = {
+  move:      () => beep(220, 0.025, 'square', 0.018),
+  rotate:    () => beep(330, 0.04, 'square', 0.03),
+  hard_drop: () => beep(150, 0.1, 'triangle', 0.06, 70),
+  hold:      () => beep(520, 0.06, 'sine', 0.04, 300),
+  clear:     (n) => {
+    const notes = [440, 554, 659, 880];
+    for (let i = 0; i <= Math.min(n, 3); i++) {
+      setTimeout(() => beep(notes[i], 0.09, 'square', 0.05), i * 70);
+    }
+  },
+  round:     () => beep(600, 0.5, 'sawtooth', 0.045, 120),
+};
+
+function setMuted(m) {
+  muted = m;
+  localStorage.setItem('tetris-muted', m ? '1' : '0');
+  document.getElementById('mute-btn').textContent = m ? '\u{1F507}' : '\u{1F50A}';
 }
 
 function showStatus(text, ms) {
@@ -434,8 +538,12 @@ function connect() {
       updateLeaderboard(msg.leaderboard);
       if (msg.round_reset) {
         showStatus(`BOARD FULL — ROUND ${msg.round}`, 2500);
+        SFX.round();
       }
-      if (msg.cleared_rows) startFlashes(msg.cleared_rows);
+      if (msg.cleared_rows) {
+        startFlashes(msg.cleared_rows);
+        SFX.clear(msg.cleared_rows.length);
+      }
       updateAfk();
       render();
       scrollToMyPiece();
@@ -561,10 +669,59 @@ function render() {
     ctx.fillRect(0, f.row * CELL, cols * CELL, CELL);
   }
 
+  // Hard-drop sparks
+  for (const p of particles) {
+    const alpha = Math.max(0, (p.until - now) / PARTICLE_MS);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1.0;
+
+  renderMinimap(rows, cols);
+
   // Sidebar previews
   const me = activePieces[myPlayerId];
   renderPreview(nextCtx, nextCanvas, me && me.next_piece);
   renderPreview(holdCtx, holdCanvas, me && me.held_piece);
+}
+
+// Minimap: the whole board at a glance — settled cells, player dots,
+// and a rectangle showing the part of the board currently on screen
+function renderMinimap(rows, cols) {
+  const mw = minimap.width, mh = minimap.height;
+  const sx = mw / cols, sy = mh / rows;
+
+  mctx.clearRect(0, 0, mw, mh);
+
+  mctx.globalAlpha = 0.55;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (grid[r][c] !== 0) {
+        mctx.fillStyle = COLORS[grid[r][c]] || '#888';
+        mctx.fillRect(c * sx, r * sy, Math.max(sx, 1), Math.max(sy, 1));
+      }
+    }
+  }
+  mctx.globalAlpha = 1.0;
+
+  for (const pid in activePieces) {
+    const p = activePieces[pid];
+    const isMe = pid === myPlayerId;
+    mctx.fillStyle = isMe ? '#00e5e5' : 'rgba(255,255,255,0.8)';
+    for (const cell of p.cells) {
+      const s = isMe ? 2.5 : 1.5;
+      mctx.fillRect(cell.col * sx - s / 2 + sx / 2, cell.row * sy - s / 2 + sy / 2, s, s);
+    }
+  }
+
+  // Viewport rectangle
+  const boardPx = cols * CELL;
+  const vx = (canvasWrap.scrollLeft / boardPx) * mw;
+  const vw = Math.min(mw, (canvasWrap.clientWidth / boardPx) * mw);
+  mctx.strokeStyle = 'rgba(0,229,229,0.8)';
+  mctx.lineWidth = 1;
+  mctx.strokeRect(vx + 0.5, 0.5, vw - 1, mh - 1);
 }
 
 // The server removes pieces of players idle for ~2 minutes; any keypress or
@@ -726,8 +883,24 @@ const DAS_DELAY = 170;   // ms before auto-repeat kicks in
 const DAS_REPEAT = 50;   // ms between repeats
 const dasTimers = {};    // action -> {delay, interval}
 
+const ACTION_SFX = {
+  left: 'move', right: 'move',
+  rotate_cw: 'rotate', rotate_ccw: 'rotate',
+  hard_drop: 'hard_drop', hold: 'hold',
+};
+
 function sendAction(action) {
   if (ws && ws.readyState === WebSocket.OPEN) {
+    // Feedback fires immediately on input, not on the server's echo
+    if (action === 'hard_drop') {
+      const me = activePieces[myPlayerId];
+      if (me && me.ghost_cells) {
+        const colorIdx = PIECE_COLOR_MAP[me.piece_type] || 0;
+        spawnDropParticles(me.ghost_cells, COLORS[colorIdx] || '#fff');
+      }
+    }
+    const sfx = ACTION_SFX[action];
+    if (sfx) SFX[sfx]();
     ws.send(JSON.stringify({ action }));
   }
 }
@@ -751,6 +924,8 @@ function startDas(action) {
 }
 
 document.addEventListener('keydown', (e) => {
+  ensureAudio(); // browsers unlock audio only after a user gesture
+  if (e.code === 'KeyM') { setMuted(!muted); return; }
   const action = KEY_MAP[e.code];
   if (!action) return;
   e.preventDefault();
@@ -792,6 +967,24 @@ for (const btn of touchControls.querySelectorAll('button')) {
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
+// Minimap: click/tap to jump the viewport to that part of the board
+minimap.addEventListener('pointerdown', (e) => {
+  if (!grid.length) return;
+  const rect = minimap.getBoundingClientRect();
+  const frac = (e.clientX - rect.left) / rect.width;
+  const boardPx = grid[0].length * CELL;
+  canvasWrap.scrollLeft = frac * boardPx - canvasWrap.clientWidth / 2;
+  render();
+});
+
+// Mute toggle: header button or the M key
+document.getElementById('mute-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  ensureAudio();
+  setMuted(!muted);
+});
+document.addEventListener('pointerdown', ensureAudio, { once: true });
+
 // Tapping the board rotates clockwise (a quick tap, not a scroll drag)
 let tapStart = null;
 canvas.addEventListener('pointerdown', (e) => {
@@ -818,6 +1011,8 @@ function startGame() {
   showStatus('Connecting...');
   connect();
 }
+
+setMuted(muted); // reflect the saved sound preference in the button icon
 
 nameBtn.addEventListener('click', startGame);
 nameInput.addEventListener('keydown', (e) => {
